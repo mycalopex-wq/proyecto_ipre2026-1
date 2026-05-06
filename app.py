@@ -117,7 +117,6 @@ def create_context_maps(ax_regional, ax_national, main_gdf):
         cx.add_basemap(ax_national, source=cx.providers.CartoDB.Positron, zoom=5, alpha=0.9)
     except Exception: pass
     
-    # CAMBIO 5: Nombres solicitados
     for ax_map, title in zip([ax_regional, ax_national], ["Contexto regional", "Contexto país"]):
         ax_map.set_xticks([]); ax_map.set_yticks([])
         for spine in ax_map.spines.values(): spine.set_edgecolor('black'); spine.set_linewidth(1.5)
@@ -200,18 +199,13 @@ def pre_generar_plotly(df_firmas, df_corr, sat_name):
     pre_firmas, pre_corr = {}, {}
     if df_firmas.empty: return pre_firmas, pre_corr
     coberturas = df_firmas['Cobertura'].unique()
-    
-    # CAMBIO 4: Calcular máximo global para estandarizar el eje Y y hacerlo comparable
-    max_ref = df_firmas['Reflectancia'].max()
-    y_max = max_ref * 1.1 if not np.isnan(max_ref) else 1.0
 
     for cob in coberturas:
         df_f = df_firmas[df_firmas['Cobertura'] == cob]
-        # CAMBIO 4: Colores sobrios y tema simple_white
         fig_f = px.line(df_f, x="Banda", y="Reflectancia", color="Sensor", markers=True, title=f"Firma: {cob}", color_discrete_map={'UAS':'#1f77b4', sat_name:'#8c564b'})
         fig_f.update_traces(line=dict(width=2), marker=dict(size=8, symbol='circle'))
         fig_f.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red Edge", "NIR"], showgrid=True, gridcolor='LightGray')
-        fig_f.update_yaxes(range=[0, y_max], showgrid=True, gridcolor='LightGray')
+        fig_f.update_yaxes(showgrid=True, gridcolor='LightGray') # Rango dinamico
         fig_f.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
         pre_firmas[cob] = fig_f
         
@@ -223,7 +217,6 @@ def pre_generar_plotly(df_firmas, df_corr, sat_name):
                 fig_c = px.scatter(df_c, x="UAS", y="SAT", color="Banda", title=f"{cob} (R²={r2:.3f})")
                 x_min, x_max = X.min(), X.max()
                 fig_c.add_trace(go.Scatter(x=[x_min, x_max], y=mod.predict([[x_min], [x_max]]), mode='lines', name='Tendencia', line=dict(color='black', width=2, dash='dot')))
-                # CAMBIO 4: Estética sobria en correlaciones
                 fig_c.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
                 fig_c.update_xaxes(showgrid=True, gridcolor='LightGray'); fig_c.update_yaxes(showgrid=True, gridcolor='LightGray')
                 pre_corr[cob] = fig_c
@@ -372,8 +365,7 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                         for j, m in enumerate(["RGB (Color Real)", "Falso Color (NIR-R-G)", "NDVI"]):
                             with m_tabs[j]: 
                                 st.image(d['pre_m'][f"{sensor}_{m}"], width="stretch")
-                                # CAMBIO 3: Botón de descarga para cartografía
-                                st.download_button(label=f"⬇️ Descargar Mapa {m} (PNG)", data=d['pre_m'][f"{sensor}_{m}"], file_name=f"{sensor}_{m}.png", mime="image/png", key=f"dl_map_{name}_{sensor}_{m}")
+                                st.download_button(label=f"Descargar Mapa {m} (PNG)", data=d['pre_m'][f"{sensor}_{m}"], file_name=f"{sensor}_{m}.png", mime="image/png", key=f"dl_map_{name}_{sensor}_{m}")
                         with m_tabs[3]:
                             banda_sel = st.selectbox("Seleccione Banda:", range(1, 6), key=f"bp_{name}_{sensor}")
                             mapa_puro = generar_mapa_crudo(d, sensor, "Banda Pura", u_b, u_g, u_r, u_re, u_n, s_b, s_g, s_r, s_re, s_n, sat_scale, name, banda_sel)
@@ -382,13 +374,12 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
             with sub_tabs[1]:
                 cobs = d['df_firmas']['Cobertura'].unique()
                 
-                # CAMBIO 1 y 4: Plot General de TODAS las firmas espectrales juntas (UAS)
                 st.markdown("### Firma Espectral General (UAS)")
                 df_uas = d['df_firmas'][d['df_firmas']['Sensor'] == 'UAS']
                 if not df_uas.empty:
                     fig_todas = px.line(df_uas, x="Banda", y="Reflectancia", color="Cobertura", markers=True, title="Todas las Coberturas (UAS)")
                     fig_todas.update_traces(line=dict(width=2), marker=dict(size=8))
-                    fig_todas.update_layout(template="simple_white", plot_bgcolor='white', yaxis_range=[0, df_uas['Reflectancia'].max()*1.1])
+                    fig_todas.update_layout(template="simple_white", plot_bgcolor='white') # Rango dinamico
                     fig_todas.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red Edge", "NIR"], showgrid=True, gridcolor='LightGray')
                     fig_todas.update_yaxes(showgrid=True, gridcolor='LightGray')
                     st.plotly_chart(fig_todas, width="stretch", config={'toImageButtonOptions': {'format': 'png', 'filename': 'Firma_General'}})
@@ -414,7 +405,6 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                         df_r2 = pd.DataFrame(r2_list_escena)
                         fig_r2 = px.bar(df_r2, x='Cobertura', y='R2', color='R2', color_continuous_scale='Blues', title="Ajuste Radiométrico UAS vs Satélite (Escena Actual)")
                         
-                        # CAMBIO 2 y 4: Línea de promedio en gráfico de barras
                         mean_r2 = df_r2['R2'].mean()
                         fig_r2.add_hline(y=mean_r2, line_dash="dash", line_color="#d62728", annotation_text=f"Promedio Área: {mean_r2:.3f}", annotation_position="top right")
                         fig_r2.update_layout(template="simple_white")
@@ -427,13 +417,12 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                         with cols[i%3]: 
                             st.plotly_chart(d['pre_p_c'][c], width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
                             
-            # CAMBIO 3: Centro de descargas de la escena
-            with st.expander("📥 Centro de Descargas (Datos Numéricos)", expanded=False):
+            with st.expander("Centro de Descargas (Datos Numéricos)", expanded=False):
                 col_dl1, col_dl2 = st.columns(2)
-                col_dl1.download_button("📊 Descargar Datos de Firmas (CSV)", d['df_firmas'].to_csv(index=False).encode('utf-8'), f"firmas_{name}.csv", "text/csv")
+                col_dl1.download_button("Descargar Datos de Firmas (CSV)", d['df_firmas'].to_csv(index=False).encode('utf-8'), f"firmas_{name}.csv", "text/csv")
                 if not d['df_corr'].empty:
-                    col_dl2.download_button("📈 Descargar Datos de Correlación (CSV)", d['df_corr'].to_csv(index=False).encode('utf-8'), f"correlacion_{name}.csv", "text/csv")
-                st.info("💡 **Para descargar los gráficos interactivos**, pasa el ratón sobre cualquier gráfico y haz clic en el ícono de la cámara de fotos (esquina superior derecha).")
+                    col_dl2.download_button("Descargar Datos de Correlación (CSV)", d['df_corr'].to_csv(index=False).encode('utf-8'), f"correlacion_{name}.csv", "text/csv")
+                st.info("Para descargar los gráficos interactivos, pasa el cursor sobre cualquier gráfico y haz clic en el icono de la cámara de fotos (esquina superior derecha).")
 
     # --- PESTAÑA COMPARACIÓN GLOBAL ---
     if len(names) > 0:
@@ -442,9 +431,6 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
             all_f = pd.concat([st.session_state.data_escenas[n]['df_firmas'].assign(Escena=n) for n in names])
             cobs = all_f['Cobertura'].unique()
             gt1, gt2, gt3 = st.tabs(["Evolución UAS", "Evolución Satélite", "Resumen de Ajuste (R²)"])
-            
-            # CAMBIO 4: Estandarizar eje Y en los gráficos globales
-            max_ref_global = all_f['Reflectancia'].max() * 1.1 if not all_f.empty else 1.0
 
             with gt1:
                 cols = st.columns(3)
@@ -452,7 +438,7 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                     df_c = all_f[(all_f['Cobertura']==c) & (all_f['Sensor']=='UAS')]
                     fig = px.line(df_c, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"UAS: {c}")
                     fig.update_traces(line=dict(width=2), marker=dict(size=8))
-                    fig.update_layout(template="simple_white", yaxis_range=[0, max_ref_global], legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                    fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80)) # Rango dinamico
                     fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red Edge", "NIR"], showgrid=True, gridcolor='LightGray')
                     fig.update_yaxes(showgrid=True, gridcolor='LightGray')
                     with cols[i%3]: st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
@@ -464,7 +450,7 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                     if not df_c.empty:
                         fig = px.line(df_c, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"Sat: {c}")
                         fig.update_traces(line=dict(width=2), marker=dict(size=8))
-                        fig.update_layout(template="simple_white", yaxis_range=[0, max_ref_global], legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                        fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80)) # Rango dinamico
                         fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red Edge", "NIR"], showgrid=True, gridcolor='LightGray')
                         fig.update_yaxes(showgrid=True, gridcolor='LightGray')
                         with cols[i%3]: st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
@@ -485,7 +471,6 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                     if r2_list:
                         df_r2_glob = pd.DataFrame(r2_list)
                         
-                        # CAMBIO 1 y 2: Gráfico de barras AGRUPADAS para múltiples escenas + Promedio global
                         fig_r2_glob = px.bar(df_r2_glob, x='Cobertura', y='R2', color='Escena', barmode='group', title="Comparación R² por Cobertura y Escena")
                         promedio_total = df_r2_glob['R2'].mean()
                         fig_r2_glob.add_hline(y=promedio_total, line_dash="dash", line_color="#d62728", annotation_text=f"Promedio Global Total: {promedio_total:.3f}", annotation_position="top right")
@@ -505,8 +490,7 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                                 fig.update_xaxes(showgrid=True, gridcolor='LightGray'); fig.update_yaxes(showgrid=True, gridcolor='LightGray')
                                 with cols[i%3]: st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
             
-            # CAMBIO 3: Descarga Global
-            with st.expander("📥 Centro de Descargas (Consolidado Global)", expanded=False):
-                st.download_button("📊 Descargar TODAS las Firmas (CSV)", all_f.to_csv(index=False).encode('utf-8'), "firmas_globales.csv", "text/csv")
+            with st.expander("Centro de Descargas (Consolidado Global)", expanded=False):
+                st.download_button("Descargar TODAS las Firmas (CSV)", all_f.to_csv(index=False).encode('utf-8'), "firmas_globales.csv", "text/csv")
                 if all_c_list:
-                    st.download_button("📈 Descargar TODAS las Correlaciones (CSV)", all_c.to_csv(index=False).encode('utf-8'), "correlaciones_globales.csv", "text/csv")
+                    st.download_button("Descargar TODAS las Correlaciones (CSV)", all_c.to_csv(index=False).encode('utf-8'), "correlaciones_globales.csv", "text/csv")
