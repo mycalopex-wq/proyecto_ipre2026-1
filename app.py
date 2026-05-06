@@ -116,7 +116,9 @@ def create_context_maps(ax_regional, ax_national, main_gdf):
         ax_national.set_ylim(cy_coord - buffer_nat_y, cy_coord + buffer_nat_y)
         cx.add_basemap(ax_national, source=cx.providers.CartoDB.Positron, zoom=5, alpha=0.9)
     except Exception: pass
-    for ax_map, title in zip([ax_regional, ax_national], ["Contexto Regional", "Ubicación País"]):
+    
+    # CAMBIO 5: Nombres solicitados
+    for ax_map, title in zip([ax_regional, ax_national], ["Contexto regional", "Contexto país"]):
         ax_map.set_xticks([]); ax_map.set_yticks([])
         for spine in ax_map.spines.values(): spine.set_edgecolor('black'); spine.set_linewidth(1.5)
         ax_map.set_title(title, fontsize=11, weight='bold', color='black', pad=10)
@@ -198,15 +200,21 @@ def pre_generar_plotly(df_firmas, df_corr, sat_name):
     pre_firmas, pre_corr = {}, {}
     if df_firmas.empty: return pre_firmas, pre_corr
     coberturas = df_firmas['Cobertura'].unique()
+    
+    # CAMBIO 4: Calcular máximo global para estandarizar el eje Y y hacerlo comparable
+    max_ref = df_firmas['Reflectancia'].max()
+    y_max = max_ref * 1.1 if not np.isnan(max_ref) else 1.0
+
     for cob in coberturas:
         df_f = df_firmas[df_firmas['Cobertura'] == cob]
-        fig_f = px.line(df_f, x="Banda", y="Reflectancia", color="Sensor", markers=True, title=f"{cob}", color_discrete_map={'UAS':'blue', sat_name:'red'})
-        fig_f.update_traces(line=dict(width=3, dash='dash'), marker=dict(size=7, symbol='circle-dot'))
-        fig_f.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red Edge", "NIR"])
-        fig_f.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=90))
+        # CAMBIO 4: Colores sobrios y tema simple_white
+        fig_f = px.line(df_f, x="Banda", y="Reflectancia", color="Sensor", markers=True, title=f"Firma: {cob}", color_discrete_map={'UAS':'#1f77b4', sat_name:'#8c564b'})
+        fig_f.update_traces(line=dict(width=2), marker=dict(size=8, symbol='circle'))
+        fig_f.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red Edge", "NIR"], showgrid=True, gridcolor='LightGray')
+        fig_f.update_yaxes(range=[0, y_max], showgrid=True, gridcolor='LightGray')
+        fig_f.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
         pre_firmas[cob] = fig_f
         
-        # EL PARCHE ANTI-KEYERROR AQUI
         if not df_corr.empty and 'Cobertura' in df_corr.columns:
             df_c = df_corr[df_corr['Cobertura'] == cob]
             if not df_c.empty and len(df_c) > 2:
@@ -215,7 +223,9 @@ def pre_generar_plotly(df_firmas, df_corr, sat_name):
                 fig_c = px.scatter(df_c, x="UAS", y="SAT", color="Banda", title=f"{cob} (R²={r2:.3f})")
                 x_min, x_max = X.min(), X.max()
                 fig_c.add_trace(go.Scatter(x=[x_min, x_max], y=mod.predict([[x_min], [x_max]]), mode='lines', name='Tendencia', line=dict(color='black', width=2, dash='dot')))
-                fig_c.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=90))
+                # CAMBIO 4: Estética sobria en correlaciones
+                fig_c.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                fig_c.update_xaxes(showgrid=True, gridcolor='LightGray'); fig_c.update_yaxes(showgrid=True, gridcolor='LightGray')
                 pre_corr[cob] = fig_c
     return pre_firmas, pre_corr
 
@@ -268,7 +278,7 @@ def generar_todos_pre_mapas(data_dict, sat_scale, b_idx, g_idx, r_idx, re_idx, n
     return pre_mapas
 
 # -----------------------------
-# 3. INTERFAZ (SIDEBAR ORIGINAL)
+# 3. INTERFAZ (SIDEBAR)
 # -----------------------------
 with st.sidebar:
     st.header("Configuración del Análisis")
@@ -278,8 +288,6 @@ with st.sidebar:
             preview_gdf = load_vector_preview(vector_file); st.session_state.raw_gdf = preview_gdf
             resumen_columnas = [{"Columna": c, "Ejemplos": ", ".join(map(str, preview_gdf[c].dropna().unique()[:3]))} for c in preview_gdf.columns if c != 'geometry']
             st.dataframe(pd.DataFrame(resumen_columnas), hide_index=True, width="stretch")
-            
-            # EL PARCHE PARA QUE NO HAYA NAMEERROR NI ATTRIBUTEERROR
             st.session_state.col_clase = st.selectbox("Columna Clase:", [c for c in preview_gdf.columns if c != 'geometry'], key='selector_clase')
             
     num_escenas = st.number_input("Cantidad Escenas", 1, 10, 1)
@@ -293,7 +301,6 @@ with st.sidebar:
     with c2: s_b, s_g, s_r, s_re, s_n = st.number_input("S-B",1), st.number_input("S-G",2), st.number_input("S-R",3), st.number_input("S-RE",4), st.number_input("S-N",5)
     
     if st.button("Ejecutar Análisis Espacial", width="stretch"):
-        # OTRO PARCHE DE SEGURIDAD AQUI
         if 'col_clase' not in st.session_state:
             st.error("Por favor, sube un archivo vectorial primero.")
         else:
@@ -310,10 +317,10 @@ with st.sidebar:
     if st.button("Reiniciar Entorno"): st.session_state.clear(); st.rerun()
 
 # -----------------------------
-# 5. RENDERIZADO PROGRESIVO (ORIGINAL RESTAURADO)
+# 5. RENDERIZADO PROGRESIVO
 # -----------------------------
 if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
-    col_clase_input = st.session_state.col_clase # Rescatamos tu variable
+    col_clase_input = st.session_state.col_clase 
     names = list(st.session_state.data_escenas.keys())
     tabs = st.tabs([f"Análisis {n}" for n in names] + (["Comparación Global"] if len(names)>0 else []))
     
@@ -341,7 +348,7 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                 fig_pie = px.pie(df_stats, values='area_m2', names=col_clase_input, hole=0.4, color=col_clase_input, color_discrete_map=st.session_state.color_map)
                 st.plotly_chart(fig_pie, width="stretch")
 
-            # --- CARGA PERRO HACKER ---
+            # --- CARGA PROCESAMIENTO ---
             if 'pre_m' not in d:
                 loading_ph = st.empty()
                 with loading_ph.container():
@@ -363,15 +370,35 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                     with s_sel[i]:
                         m_tabs = st.tabs(["RGB", "Falso Color", "NDVI", "Banda Pura"])
                         for j, m in enumerate(["RGB (Color Real)", "Falso Color (NIR-R-G)", "NDVI"]):
-                            with m_tabs[j]: st.image(d['pre_m'][f"{sensor}_{m}"], width="stretch")
+                            with m_tabs[j]: 
+                                st.image(d['pre_m'][f"{sensor}_{m}"], width="stretch")
+                                # CAMBIO 3: Botón de descarga para cartografía
+                                st.download_button(label=f"⬇️ Descargar Mapa {m} (PNG)", data=d['pre_m'][f"{sensor}_{m}"], file_name=f"{sensor}_{m}.png", mime="image/png", key=f"dl_map_{name}_{sensor}_{m}")
                         with m_tabs[3]:
                             banda_sel = st.selectbox("Seleccione Banda:", range(1, 6), key=f"bp_{name}_{sensor}")
-                            st.image(generar_mapa_crudo(d, sensor, "Banda Pura", u_b, u_g, u_r, u_re, u_n, s_b, s_g, s_r, s_re, s_n, sat_scale, name, banda_sel), width="stretch")
+                            mapa_puro = generar_mapa_crudo(d, sensor, "Banda Pura", u_b, u_g, u_r, u_re, u_n, s_b, s_g, s_r, s_re, s_n, sat_scale, name, banda_sel)
+                            st.image(mapa_puro, width="stretch")
             
             with sub_tabs[1]:
-                cobs = d['df_firmas']['Cobertura'].unique(); cols = st.columns(3)
+                cobs = d['df_firmas']['Cobertura'].unique()
+                
+                # CAMBIO 1 y 4: Plot General de TODAS las firmas espectrales juntas (UAS)
+                st.markdown("### Firma Espectral General (UAS)")
+                df_uas = d['df_firmas'][d['df_firmas']['Sensor'] == 'UAS']
+                if not df_uas.empty:
+                    fig_todas = px.line(df_uas, x="Banda", y="Reflectancia", color="Cobertura", markers=True, title="Todas las Coberturas (UAS)")
+                    fig_todas.update_traces(line=dict(width=2), marker=dict(size=8))
+                    fig_todas.update_layout(template="simple_white", plot_bgcolor='white', yaxis_range=[0, df_uas['Reflectancia'].max()*1.1])
+                    fig_todas.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red Edge", "NIR"], showgrid=True, gridcolor='LightGray')
+                    fig_todas.update_yaxes(showgrid=True, gridcolor='LightGray')
+                    st.plotly_chart(fig_todas, width="stretch", config={'toImageButtonOptions': {'format': 'png', 'filename': 'Firma_General'}})
+                
+                st.markdown("---")
+                st.markdown("### Firmas por Cobertura Individual")
+                cols = st.columns(3)
                 for i, c in enumerate(cobs):
-                    with cols[i%3]: st.plotly_chart(d['pre_p_f'][c], width="stretch")
+                    with cols[i%3]: 
+                        st.plotly_chart(d['pre_p_f'][c], width="stretch", config={'toImageButtonOptions': {'format': 'png', 'filename': f'Firma_{c}'}})
             
             with sub_tabs[2]:
                 st.subheader(f"Resumen Radiométrico: {name}")
@@ -384,13 +411,29 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                                 mod = LinearRegression().fit(df_sub[['UAS']], df_sub['SAT'])
                                 r2_list_escena.append({'Cobertura': c, 'R2': r2_score(df_sub['SAT'], mod.predict(df_sub[['UAS']]))})
                     if r2_list_escena:
-                        st.plotly_chart(px.bar(pd.DataFrame(r2_list_escena), x='Cobertura', y='R2', color='R2', color_continuous_scale='Viridis', title="Ajuste Radiométrico UAS vs Satélite (Escena Actual)"), width="stretch")
+                        df_r2 = pd.DataFrame(r2_list_escena)
+                        fig_r2 = px.bar(df_r2, x='Cobertura', y='R2', color='R2', color_continuous_scale='Blues', title="Ajuste Radiométrico UAS vs Satélite (Escena Actual)")
+                        
+                        # CAMBIO 2 y 4: Línea de promedio en gráfico de barras
+                        mean_r2 = df_r2['R2'].mean()
+                        fig_r2.add_hline(y=mean_r2, line_dash="dash", line_color="#d62728", annotation_text=f"Promedio Área: {mean_r2:.3f}", annotation_position="top right")
+                        fig_r2.update_layout(template="simple_white")
+                        st.plotly_chart(fig_r2, width="stretch", config={'toImageButtonOptions': {'format': 'png', 'filename': 'R2_Escena'}})
                 
                 st.markdown("**Regresiones Lineales de la Escena**")
                 cols = st.columns(3)
                 for i, c in enumerate(cobs):
                     if c in d.get('pre_p_c', {}):
-                        with cols[i%3]: st.plotly_chart(d['pre_p_c'][c], width="stretch")
+                        with cols[i%3]: 
+                            st.plotly_chart(d['pre_p_c'][c], width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
+                            
+            # CAMBIO 3: Centro de descargas de la escena
+            with st.expander("📥 Centro de Descargas (Datos Numéricos)", expanded=False):
+                col_dl1, col_dl2 = st.columns(2)
+                col_dl1.download_button("📊 Descargar Datos de Firmas (CSV)", d['df_firmas'].to_csv(index=False).encode('utf-8'), f"firmas_{name}.csv", "text/csv")
+                if not d['df_corr'].empty:
+                    col_dl2.download_button("📈 Descargar Datos de Correlación (CSV)", d['df_corr'].to_csv(index=False).encode('utf-8'), f"correlacion_{name}.csv", "text/csv")
+                st.info("💡 **Para descargar los gráficos interactivos**, pasa el ratón sobre cualquier gráfico y haz clic en el ícono de la cámara de fotos (esquina superior derecha).")
 
     # --- PESTAÑA COMPARACIÓN GLOBAL ---
     if len(names) > 0:
@@ -400,13 +443,19 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
             cobs = all_f['Cobertura'].unique()
             gt1, gt2, gt3 = st.tabs(["Evolución UAS", "Evolución Satélite", "Resumen de Ajuste (R²)"])
             
+            # CAMBIO 4: Estandarizar eje Y en los gráficos globales
+            max_ref_global = all_f['Reflectancia'].max() * 1.1 if not all_f.empty else 1.0
+
             with gt1:
                 cols = st.columns(3)
                 for i, c in enumerate(cobs):
                     df_c = all_f[(all_f['Cobertura']==c) & (all_f['Sensor']=='UAS')]
                     fig = px.line(df_c, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"UAS: {c}")
-                    fig.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=90))
-                    with cols[i%3]: st.plotly_chart(fig, width="stretch")
+                    fig.update_traces(line=dict(width=2), marker=dict(size=8))
+                    fig.update_layout(template="simple_white", yaxis_range=[0, max_ref_global], legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                    fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red Edge", "NIR"], showgrid=True, gridcolor='LightGray')
+                    fig.update_yaxes(showgrid=True, gridcolor='LightGray')
+                    with cols[i%3]: st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
             
             with gt2:
                 cols = st.columns(3)
@@ -414,21 +463,35 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                     df_c = all_f[(all_f['Cobertura']==c) & (all_f['Sensor']==sat_name)]
                     if not df_c.empty:
                         fig = px.line(df_c, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"Sat: {c}")
-                        fig.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=90))
-                        with cols[i%3]: st.plotly_chart(fig, width="stretch")
+                        fig.update_traces(line=dict(width=2), marker=dict(size=8))
+                        fig.update_layout(template="simple_white", yaxis_range=[0, max_ref_global], legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                        fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red Edge", "NIR"], showgrid=True, gridcolor='LightGray')
+                        fig.update_yaxes(showgrid=True, gridcolor='LightGray')
+                        with cols[i%3]: st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
             
             with gt3:
-                all_c_list = [st.session_state.data_escenas[n]['df_corr'] for n in names if st.session_state.data_escenas[n]['has_sat'] and not st.session_state.data_escenas[n]['df_corr'].empty]
+                all_c_list = [st.session_state.data_escenas[n]['df_corr'].assign(Escena=n) for n in names if st.session_state.data_escenas[n]['has_sat'] and not st.session_state.data_escenas[n]['df_corr'].empty]
                 if all_c_list:
                     all_c = pd.concat(all_c_list)
                     r2_list = []
-                    for c in cobs:
-                        df_sub = all_c[all_c['Cobertura'] == c]
-                        if len(df_sub) > 5:
-                            mod = LinearRegression().fit(df_sub[['UAS']], df_sub['SAT'])
-                            r2_list.append({'Cobertura': c, 'R2': r2_score(df_sub['SAT'], mod.predict(df_sub[['UAS']]))})
+                    for n in names:
+                        df_esc = all_c[all_c['Escena'] == n]
+                        for c in cobs:
+                            df_sub = df_esc[df_esc['Cobertura'] == c]
+                            if len(df_sub) > 5:
+                                mod = LinearRegression().fit(df_sub[['UAS']], df_sub['SAT'])
+                                r2_list.append({'Escena': n, 'Cobertura': c, 'R2': r2_score(df_sub['SAT'], mod.predict(df_sub[['UAS']]))})
+                    
                     if r2_list:
-                        st.plotly_chart(px.bar(pd.DataFrame(r2_list), x='Cobertura', y='R2', color='R2', color_continuous_scale='Viridis', title="Ajuste Radiométrico Global"), width="stretch")
+                        df_r2_glob = pd.DataFrame(r2_list)
+                        
+                        # CAMBIO 1 y 2: Gráfico de barras AGRUPADAS para múltiples escenas + Promedio global
+                        fig_r2_glob = px.bar(df_r2_glob, x='Cobertura', y='R2', color='Escena', barmode='group', title="Comparación R² por Cobertura y Escena")
+                        promedio_total = df_r2_glob['R2'].mean()
+                        fig_r2_glob.add_hline(y=promedio_total, line_dash="dash", line_color="#d62728", annotation_text=f"Promedio Global Total: {promedio_total:.3f}", annotation_position="top right")
+                        fig_r2_glob.update_layout(template="simple_white")
+                        st.plotly_chart(fig_r2_glob, width="stretch", config={'toImageButtonOptions': {'format': 'png', 'filename': 'R2_Global'}})
+                        
                         st.markdown("### Regresiones Consolidadas")
                         cols = st.columns(3)
                         for i, c in enumerate(cobs):
@@ -436,7 +499,14 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                             if not df_sub.empty:
                                 mod_g = LinearRegression().fit(df_sub[['UAS']], df_sub['SAT'])
                                 r2_g = r2_score(df_sub['SAT'], mod_g.predict(df_sub[['UAS']]))
-                                fig = px.scatter(df_sub, x="UAS", y="SAT", color="Banda", title=f"{c} (R² = {r2_g:.3f})")
+                                fig = px.scatter(df_sub, x="UAS", y="SAT", color="Escena", title=f"{c} (R² General = {r2_g:.3f})")
                                 fig.add_trace(go.Scatter(x=[df_sub['UAS'].min(), df_sub['UAS'].max()], y=mod_g.predict([[df_sub['UAS'].min()], [df_sub['UAS'].max()]]), mode='lines', name='Tendencia', line=dict(color='black', width=2, dash='dot')))
-                                fig.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=90))
-                                with cols[i%3]: st.plotly_chart(fig, width="stretch")
+                                fig.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                                fig.update_xaxes(showgrid=True, gridcolor='LightGray'); fig.update_yaxes(showgrid=True, gridcolor='LightGray')
+                                with cols[i%3]: st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
+            
+            # CAMBIO 3: Descarga Global
+            with st.expander("📥 Centro de Descargas (Consolidado Global)", expanded=False):
+                st.download_button("📊 Descargar TODAS las Firmas (CSV)", all_f.to_csv(index=False).encode('utf-8'), "firmas_globales.csv", "text/csv")
+                if all_c_list:
+                    st.download_button("📈 Descargar TODAS las Correlaciones (CSV)", all_c.to_csv(index=False).encode('utf-8'), "correlaciones_globales.csv", "text/csv")
