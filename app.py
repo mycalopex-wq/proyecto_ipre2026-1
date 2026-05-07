@@ -159,7 +159,7 @@ def inicializar_base(uas_file, sat_file, master_crs, master_gdf, col_clase):
         data['has_sat'] = False
     return data
 
-def calcular_firmas(data_dict, col_clase, sat_scale, b_idx, g_idx, r_idx, re_idx, n_idx, s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, sat_name):
+def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, b_idx, g_idx, r_idx, re_idx, n_idx, s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, sat_name):
     resultados, datos_correlacion = [], []
     uas_bands = {name for idx, name in [(b_idx,"Azul"), (g_idx,"Verde"), (r_idx,"Rojo"), (re_idx,"Red Edge"), (n_idx,"NIR")] if idx > 0}
     sat_bands = {name for idx, name in [(s_b_idx,"Azul"), (s_g_idx,"Verde"), (s_r_idx,"Rojo"), (s_re_idx,"Red Edge"), (s_n_idx,"NIR")] if idx > 0}
@@ -176,16 +176,16 @@ def calcular_firmas(data_dict, col_clase, sat_scale, b_idx, g_idx, r_idx, re_idx
             if not pts: continue
             coordenadas = [(pt.x, pt.y) for pt in pts]
             
-            # 1. Extraccion para Firma Nativa del Dron
+            # 1. Extraccion para firma nativa del dron
             muestras_uas_nat = np.array(list(uas_raw.sample(coordenadas))).astype(float)
             muestras_uas_nat[muestras_uas_nat <= 0] = np.nan
             firma_uas_nat = np.nanmean(muestras_uas_nat, axis=0)
             band_names_uas_map = {idx: name for idx, name in [(b_idx,"Azul"), (g_idx,"Verde"), (r_idx,"Rojo"), (re_idx,"Red Edge"), (n_idx,"NIR")] if idx > 0}
             for b in range(uas_raw.count):
                 if (b+1) in band_names_uas_map: 
-                    resultados.append({'Cobertura': row[col_clase], 'Banda': band_names_uas_map[b+1], 'Sensor': 'UAS (Nativo)', 'Reflectancia': firma_uas_nat[b]})
+                    resultados.append({'Cobertura': row[col_clase], 'Banda': band_names_uas_map[b+1], 'Sensor': 'UAS (nativo)', 'Reflectancia': firma_uas_nat[b]})
             
-            # 2. Extraccion para 10m (Comparacion y R2)
+            # 2. Extraccion para 10m (comparacion y R2)
             muestras_uas_10m = np.array(list(uas_10m.sample(coordenadas))).astype(float)
             muestras_uas_10m[muestras_uas_10m <= 0] = np.nan
             firma_uas_10m = np.nanmean(muestras_uas_10m, axis=0)
@@ -194,8 +194,11 @@ def calcular_firmas(data_dict, col_clase, sat_scale, b_idx, g_idx, r_idx, re_idx
                     resultados.append({'Cobertura': row[col_clase], 'Banda': band_names_uas_map[b+1], 'Sensor': 'UAS (10m)', 'Reflectancia': firma_uas_10m[b]})
             
             if sat_src:
-                muestras_sat = np.array(list(sat_src.sample(coordenadas))).astype(float) / sat_scale
-                muestras_sat[muestras_sat <= 0] = np.nan
+                muestras_sat_crudo = np.array(list(sat_src.sample(coordenadas))).astype(float)
+                # Enmascarar ceros reales antes del offset para no distorsionar el "no data"
+                muestras_sat_crudo[muestras_sat_crudo == 0] = np.nan
+                # Aplicar la matematica corregida: (Valor + Offset) / Escala
+                muestras_sat = (muestras_sat_crudo + sat_offset) / sat_scale
                 
                 mask_ambos = ~np.isnan(muestras_uas_10m).any(axis=1) & ~np.isnan(muestras_sat).any(axis=1)
                 m_uas_filt, m_sat_filt = muestras_uas_10m[mask_ambos], muestras_sat[mask_ambos]
@@ -232,8 +235,8 @@ def pre_generar_plotly(df_firmas, sat_name):
         pre_firmas[cob] = fig_f
     return pre_firmas
 
-def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, b_idx, g_idx, r_idx, re_idx, n_idx, s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, sat_scale, escena_name, banda_sel=1):
-    is_sat = (sensor_sel == "Satelite")
+def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, b_idx, g_idx, r_idx, re_idx, n_idx, s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, sat_scale, sat_offset, escena_name, banda_sel=1):
+    is_sat = (sensor_sel == "Satélite")
     with rasterio.open(data_dict['uas_path_1m']) as base_src:
         ext = [base_src.bounds.left, base_src.bounds.right, base_src.bounds.bottom, base_src.bounds.top]
         uas_data = base_src.read()
@@ -245,8 +248,11 @@ def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, b_idx, g_idx, r_idx, re_
                 if not data_dict.get('sat_clip_path'): return out
                 with rasterio.open(data_dict['sat_clip_path']) as ss:
                     if 0 < idx_s <= ss.count: reproject(rasterio.band(ss, int(idx_s)), out, src_transform=ss.transform, src_crs=ss.crs, dst_transform=base_src.transform, dst_crs=base_src.crs, resampling=Resampling.bilinear)
-                    out /= sat_scale
-            out[master_mask] = np.nan; out[out <= 0] = np.nan; return out
+                    no_data_mask = (out == 0)
+                    out = (out + sat_offset) / sat_scale
+                    out[no_data_mask] = np.nan
+            out[master_mask] = np.nan
+            return out
         def norm(arr):
             if np.isnan(arr).all(): return arr
             p2, p98 = np.nanpercentile(arr, [2, 98])
@@ -270,14 +276,14 @@ def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, b_idx, g_idx, r_idx, re_
         fig.subplots_adjust(left=0.02, right=0.98, wspace=0.1)
         buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', facecolor='white'); plt.close(fig); return buf.getvalue()
 
-def generar_todos_pre_mapas(data_dict, sat_scale, b_idx, g_idx, r_idx, re_idx, n_idx, s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, escena_name):
+def generar_todos_pre_mapas(data_dict, sat_scale, sat_offset, b_idx, g_idx, r_idx, re_idx, n_idx, s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, escena_name):
     pre_mapas = {}
     modos_pre = ["RGB (color real)", "Falso color (NIR-R-G)", "NDVI"]
     sensores_pre = ["UAS"]
-    if data_dict.get('has_sat'): sensores_pre.append("Satelite")
+    if data_dict.get('has_sat'): sensores_pre.append("Satélite")
     for sensor in sensores_pre:
         for modo in modos_pre:
-            pre_mapas[f"{sensor}_{modo}"] = generar_mapa_crudo(data_dict, sensor, modo, b_idx, g_idx, r_idx, re_idx, n_idx, s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, sat_scale, escena_name)
+            pre_mapas[f"{sensor}_{modo}"] = generar_mapa_crudo(data_dict, sensor, modo, b_idx, g_idx, r_idx, re_idx, n_idx, s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, sat_scale, sat_offset, escena_name)
     return pre_mapas
 
 # -----------------------------
@@ -293,12 +299,17 @@ with st.sidebar:
             st.dataframe(pd.DataFrame(resumen_columnas), hide_index=True, width="stretch")
             st.session_state.col_clase = st.selectbox("Columna clase:", [c for c in preview_gdf.columns if c != 'geometry'], key='selector_clase')
             
-    num_escenas = st.number_input("Cantidad escenas", 1, 10, 1)
+    num_escenas = st.number_input("Cantidad de escenas", 1, 10, 1)
     archivos_escenas = []
     for i in range(1, num_escenas + 1):
         with st.expander(f"Archivos escena {i}"):
             archivos_escenas.append({"id": i, "uas": st.file_uploader(f"UAS {i}", type=["tif"]), "sat": st.file_uploader(f"SAT {i}", type=["tif"])})
-    sat_name = st.text_input("Satélite", "Sentinel-2"); sat_scale = st.number_input("Factor escala", 10000.0)
+    sat_name = st.text_input("Satélite", "Sentinel-2")
+    
+    # Nuevos inputs de escala y offset integrados
+    sat_scale = st.number_input("Factor de escala", value=10000.0)
+    sat_offset = st.number_input("Offset (desplazamiento)", value=-1000.0)
+    
     c1, c2 = st.columns(2)
     with c1: u_b, u_g, u_r, u_re, u_n = st.number_input("U-B",1), st.number_input("U-G",2), st.number_input("U-R",3), st.number_input("U-RE",4), st.number_input("U-N",5)
     with c2: s_b, s_g, s_r, s_re, s_n = st.number_input("S-B",1), st.number_input("S-G",2), st.number_input("S-R",3), st.number_input("S-RE",4), st.number_input("S-N",5)
@@ -369,12 +380,12 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                     col1, col2, col3 = st.columns([1,1,1]); col2.image(DOG_GIF_URL, width="stretch")
                     status_text, pbar = st.empty(), st.progress(0)
                     status_text.info("Paso 1/3: Muestreo radiométrico Monte Carlo...")
-                    df_f, df_c = calcular_firmas(d, col_clase_input, sat_scale, u_b, u_g, u_r, u_re, u_n, s_b, s_g, s_r, s_re, s_n, sat_name)
+                    df_f, df_c = calcular_firmas(d, col_clase_input, sat_scale, sat_offset, u_b, u_g, u_r, u_re, u_n, s_b, s_g, s_r, s_re, s_n, sat_name)
                     d['df_firmas'], d['df_corr'] = df_f, df_c; pbar.progress(33)
                     status_text.info("Paso 2/3: Modelando firmas individuales...")
                     d['pre_p_f'] = pre_generar_plotly(df_f, sat_name); pbar.progress(66)
                     status_text.info("Paso 3/3: Renderizando mapas cartográficos...")
-                    d['pre_m'] = generar_todos_pre_mapas(d, sat_scale, u_b, u_g, u_r, u_re, u_n, s_b, s_g, s_r, s_re, s_n, name); pbar.progress(100)
+                    d['pre_m'] = generar_todos_pre_mapas(d, sat_scale, sat_offset, u_b, u_g, u_r, u_re, u_n, s_b, s_g, s_r, s_re, s_n, name); pbar.progress(100)
                 st.session_state.data_escenas[name] = d; loading_ph.empty()
 
             # --- SUB-PESTAÑAS DE ESCENA ---
@@ -382,7 +393,7 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
             
             with sub_tabs[0]:
                 s_sel = st.tabs(["UAS", "Satélite"]) if d['has_sat'] else [st.container()]
-                for i, sensor in enumerate(["UAS", "Satelite"] if d['has_sat'] else ["UAS"]):
+                for i, sensor in enumerate(["UAS", "Satélite"] if d['has_sat'] else ["UAS"]):
                     with s_sel[i]:
                         m_tabs = st.tabs(["RGB", "Falso color", "NDVI", "Banda individual"])
                         for j, m in enumerate(["RGB (color real)", "Falso color (NIR-R-G)", "NDVI"]):
@@ -391,7 +402,7 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                                 st.download_button(label=f"Descargar mapa {m} (PNG)", data=d['pre_m'][f"{sensor}_{m}"], file_name=f"{sensor}_{m}.png", mime="image/png", key=f"dl_map_{name}_{sensor}_{m}")
                         with m_tabs[3]:
                             banda_sel = st.selectbox("Seleccione banda:", range(1, 6), key=f"bp_{name}_{sensor}")
-                            mapa_puro = generar_mapa_crudo(d, sensor, "Banda individual", u_b, u_g, u_r, u_re, u_n, s_b, s_g, s_r, s_re, s_n, sat_scale, name, banda_sel)
+                            mapa_puro = generar_mapa_crudo(d, sensor, "Banda individual", u_b, u_g, u_r, u_re, u_n, s_b, s_g, s_r, s_re, s_n, sat_scale, sat_offset, name, banda_sel)
                             st.image(mapa_puro, width="stretch")
             
             with sub_tabs[1]:
@@ -401,7 +412,7 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
                 col_gen1, col_gen2 = st.columns(2)
                 
                 with col_gen1:
-                    df_uas_nat = d['df_firmas'][d['df_firmas']['Sensor'] == 'UAS (Nativo)']
+                    df_uas_nat = d['df_firmas'][d['df_firmas']['Sensor'] == 'UAS (nativo)']
                     if not df_uas_nat.empty:
                         fig_todas_uas = px.line(df_uas_nat, x="Banda", y="Reflectancia", color="Cobertura", markers=True, title="Resolución nativa dron (UAS)")
                         fig_todas_uas.update_traces(line=dict(width=2), marker=dict(size=8))
@@ -486,7 +497,7 @@ if st.session_state.get("analisis_listo") and 'col_clase' in st.session_state:
             with gt1:
                 cols = st.columns(3)
                 for i, c in enumerate(cobs):
-                    df_c = all_f[(all_f['Cobertura']==c) & (all_f['Sensor']=='UAS (Nativo)')]
+                    df_c = all_f[(all_f['Cobertura']==c) & (all_f['Sensor']=='UAS (nativo)')]
                     fig = px.line(df_c, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"UAS nativo: {c}")
                     fig.update_traces(line=dict(width=2), marker=dict(size=8))
                     fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
