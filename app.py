@@ -154,14 +154,15 @@ def parse_scene_name(filename):
         return f"{lugar} ({fecha})"
     return os.path.splitext(filename)[0]
 
-# --- Funciones para bandas de guía ---
+# --- FUNCIONES PARA BANDAS DE GUÍA ---
 def add_spectral_bands_plotly(fig):
     regiones = [
         (450, 495, "blue", "Azul"),
         (495, 570, "green", "Verde"),
         (620, 750, "red", "Rojo"),
         (750, 1400, "gray", "Nir"),
-        (1400, 2500, "orange", "Swir")
+        (1400, 1800, "orange", "Swir 1"),
+        (1900, 2500, "brown", "Swir 2")
     ]
     for x0, x1, color, nombre in regiones:
         fig.add_vrect(x0=x0, x1=x1, fillcolor=color, opacity=0.06, layer="below", line_width=0, 
@@ -174,7 +175,8 @@ def add_spectral_bands_plt(ax):
         (495, 570, "green", "Verde"),
         (620, 750, "red", "Rojo"),
         (750, 1400, "gray", "Nir"),
-        (1400, 2500, "orange", "Swir")
+        (1400, 1800, "orange", "Swir 1"),
+        (1900, 2500, "brown", "Swir 2")
     ]
     for x0, x1, color, nombre in regiones:
         ax.axvspan(x0, x1, color=color, alpha=0.06, lw=0, zorder=0)
@@ -324,8 +326,8 @@ def export_formal_scatter(df, title, r2_val):
     ax.plot(x_vals, y_vals, color='black', linestyle='--', linewidth=2, label=f'Tendencia (r²={r2_val:.3f})')
     
     ax.set_title(title, fontsize=14, weight='bold', pad=15)
-    ax.set_xlabel("Reflectancia uas", fontsize=12)
-    ax.set_ylabel("Reflectancia satélite", fontsize=12)
+    ax.set_xlabel("Reflectancia UAS", fontsize=12)
+    ax.set_ylabel("Reflectancia Satélite", fontsize=12)
     ax.grid(color='gray', linestyle=':', linewidth=0.5, alpha=0.7)
     ax.legend(frameon=True, facecolor='white', edgecolor='black')
     for spine in ax.spines.values():
@@ -434,17 +436,17 @@ def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, bandas_config, 
     uas_idx_map = {}
     
     if data_dict['tipo_datos'] == "Multiespectral (dron/satélite)":
-        b_idx, g_idx, r_idx, re_idx, n_idx, swir_idx = bandas_config['uas']
-        s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, s_swir_idx = bandas_config['sat']
+        b_idx, g_idx, r_idx, re_idx, n_idx, swir1_idx, swir2_idx = bandas_config['uas']
+        s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, s_swir1_idx, s_swir2_idx = bandas_config['sat']
         
-        uas_bands = {name for idx, name in [(b_idx,"Azul"), (g_idx,"Verde"), (r_idx,"Rojo"), (re_idx,"Red edge"), (n_idx,"Nir"), (swir_idx,"Swir")] if idx > 0}
-        sat_bands = {name for idx, name in [(s_b_idx,"Azul"), (s_g_idx,"Verde"), (s_r_idx,"Rojo"), (s_re_idx,"Red edge"), (s_n_idx,"Nir"), (s_swir_idx,"Swir")] if idx > 0}
+        uas_bands = {name for idx, name in [(b_idx,"Azul"), (g_idx,"Verde"), (r_idx,"Rojo"), (re_idx,"Red edge"), (n_idx,"Nir"), (swir1_idx,"Swir 1"), (swir2_idx,"Swir 2")] if idx > 0}
+        sat_bands = {name for idx, name in [(s_b_idx,"Azul"), (s_g_idx,"Verde"), (s_r_idx,"Rojo"), (s_re_idx,"Red edge"), (s_n_idx,"Nir"), (s_swir1_idx,"Swir 1"), (s_swir2_idx,"Swir 2")] if idx > 0}
         bandas_comunes = uas_bands.intersection(sat_bands) if data_dict['has_sat'] and data_dict['has_uas'] else set()
         
-        uas_idx_map = {name: idx-1 for idx, name in [(b_idx,"Azul"), (g_idx,"Verde"), (r_idx,"Rojo"), (re_idx,"Red edge"), (n_idx,"Nir"), (swir_idx,"Swir")] if idx > 0}
-        sat_idx_map = {name: idx-1 for idx, name in [(s_b_idx,"Azul"), (s_g_idx,"Verde"), (s_r_idx,"Rojo"), (s_re_idx,"Red edge"), (s_n_idx,"Nir"), (s_swir_idx,"Swir")] if idx > 0}
-        band_names_uas_map = {idx: name for idx, name in [(b_idx,"Azul"), (g_idx,"Verde"), (r_idx,"Rojo"), (re_idx,"Red edge"), (n_idx,"Nir"), (swir_idx,"Swir")] if idx > 0}
-        band_names_sat_map = {idx: name for idx, name in [(s_b_idx,"Azul"), (s_g_idx,"Verde"), (s_r_idx,"Rojo"), (s_re_idx,"Red edge"), (s_n_idx,"Nir"), (s_swir_idx,"Swir")] if idx > 0}
+        uas_idx_map = {name: idx-1 for idx, name in [(b_idx,"Azul"), (g_idx,"Verde"), (r_idx,"Rojo"), (re_idx,"Red edge"), (n_idx,"Nir"), (swir1_idx,"Swir 1"), (swir2_idx,"Swir 2")] if idx > 0}
+        sat_idx_map = {name: idx-1 for idx, name in [(s_b_idx,"Azul"), (s_g_idx,"Verde"), (s_r_idx,"Rojo"), (s_re_idx,"Red edge"), (s_n_idx,"Nir"), (s_swir1_idx,"Swir 1"), (s_swir2_idx,"Swir 2")] if idx > 0}
+        band_names_uas_map = {idx: name for idx, name in [(b_idx,"Azul"), (g_idx,"Verde"), (r_idx,"Rojo"), (re_idx,"Red edge"), (n_idx,"Nir"), (swir1_idx,"Swir 1"), (swir2_idx,"Swir 2")] if idx > 0}
+        band_names_sat_map = {idx: name for idx, name in [(s_b_idx,"Azul"), (s_g_idx,"Verde"), (s_r_idx,"Rojo"), (s_re_idx,"Red edge"), (s_n_idx,"Nir"), (s_swir1_idx,"Swir 1"), (s_swir2_idx,"Swir 2")] if idx > 0}
                 
     else: 
         if data_dict['has_sat']:
@@ -473,7 +475,8 @@ def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, bandas_config, 
             if i is not None and i < muestras.shape[1]: return muestras[:, i]
             return None
 
-        R, G, N, SW = get_b("Rojo"), get_b("Verde"), get_b("Nir"), get_b("Swir")
+        R, G, N, SW1, SW2 = get_b("Rojo"), get_b("Verde"), get_b("Nir"), get_b("Swir 1"), get_b("Swir 2")
+        SW = SW1 if SW1 is not None else SW2
         
         with np.errstate(divide='ignore', invalid='ignore'):
             if N is not None and R is not None:
@@ -565,8 +568,8 @@ def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, bandas_config, 
             
             if m_uas_filt is not None and m_sat_filt is not None and data_dict['tipo_datos'] == "Multiespectral (dron/satélite)":
                 for nb in bandas_comunes:
-                    u_idx = {n: i for i, n in [(b_idx,"Azul"), (g_idx,"Verde"), (r_idx,"Rojo"), (re_idx,"Red edge"), (n_idx,"Nir"), (swir_idx,"Swir")] if i > 0}[nb] - 1
-                    s_idx = {n: i for i, n in [(s_b_idx,"Azul"), (s_g_idx,"Verde"), (s_r_idx,"Rojo"), (s_re_idx,"Red edge"), (s_n_idx,"Nir"), (s_swir_idx,"Swir")] if i > 0}[nb] - 1
+                    u_idx = {n: i for i, n in [(b_idx,"Azul"), (g_idx,"Verde"), (r_idx,"Rojo"), (re_idx,"Red edge"), (n_idx,"Nir"), (swir1_idx,"Swir 1"), (swir2_idx,"Swir 2")] if i > 0}[nb] - 1
+                    s_idx = {n: i for i, n in [(s_b_idx,"Azul"), (s_g_idx,"Verde"), (s_r_idx,"Rojo"), (s_re_idx,"Red edge"), (s_n_idx,"Nir"), (s_swir1_idx,"Swir 1"), (s_swir2_idx,"Swir 2")] if i > 0}[nb] - 1
                     if u_idx < m_uas_filt.shape[1] and s_idx < m_sat_filt.shape[1]:
                         for uv, sv in zip(m_uas_filt[:, u_idx], m_sat_filt[:, s_idx]): 
                             datos_correlacion.append({'Cobertura': clase_actual, 'Banda': nb, 'Uas': uv, 'Sat': sv})
@@ -596,7 +599,7 @@ def pre_generar_graficos(df_firmas, sat_name, tipo_datos, color_map):
         
         # 1. Generación de Plotly (Interactivo)
         if tipo_datos == "Multiespectral (dron/satélite)":
-             orden_bandas = ["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir"]
+             orden_bandas = ["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"]
              x_col = "Banda"
              fig_f = px.line(df_f, x=x_col, y="Reflectancia", color="Sensor", markers=True, 
                              title=f"Firma espectral comparativa: {cob}", 
@@ -631,12 +634,12 @@ def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, bandas_config, sat_scale
     is_sat = (sensor_sel == "Satélite")
     base_path = data_dict['uas_path_1m'] if data_dict['has_uas'] else data_dict['sat_clip_path']
     
-    b_idx = g_idx = r_idx = re_idx = n_idx = swir_idx = 0
-    s_b_idx = s_g_idx = s_r_idx = s_re_idx = s_n_idx = s_swir_idx = 0
+    b_idx = g_idx = r_idx = re_idx = n_idx = swir1_idx = swir2_idx = 0
+    s_b_idx = s_g_idx = s_r_idx = s_re_idx = s_n_idx = s_swir1_idx = s_swir2_idx = 0
     
     if data_dict['tipo_datos'] == "Multiespectral (dron/satélite)":
-        b_idx, g_idx, r_idx, re_idx, n_idx, swir_idx = bandas_config['uas']
-        s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, s_swir_idx = bandas_config['sat']
+        b_idx, g_idx, r_idx, re_idx, n_idx, swir1_idx, swir2_idx = bandas_config['uas']
+        s_b_idx, s_g_idx, s_r_idx, s_re_idx, s_n_idx, s_swir1_idx, s_swir2_idx = bandas_config['sat']
 
     with rasterio.open(base_path) as base_src:
         ext = [base_src.bounds.left, base_src.bounds.right, base_src.bounds.bottom, base_src.bounds.top]
@@ -689,7 +692,9 @@ def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, bandas_config, sat_scale
                 fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02).set_label('Ndwi')
             
         elif vis_mode == "Mndwi":
-            rg, rsw = obt_banda(g_idx, s_g_idx), obt_banda(swir_idx, s_swir_idx)
+            u_swir_use = swir1_idx if swir1_idx > 0 else swir2_idx
+            s_swir_use = s_swir1_idx if s_swir1_idx > 0 else s_swir2_idx
+            rg, rsw = obt_banda(g_idx, s_g_idx), obt_banda(u_swir_use, s_swir_use)
             if check_missing(rg, rsw): plot_missing("MNDWI")
             else:
                 mndwi = (rg - rsw) / (rg + rsw + 1e-6); p2, p98 = norm_perc(mndwi)
@@ -697,7 +702,9 @@ def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, bandas_config, sat_scale
                 fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02).set_label('Mndwi')
             
         elif vis_mode == "Ndmi":
-            rn, rsw = obt_banda(n_idx, s_n_idx), obt_banda(swir_idx, s_swir_idx)
+            u_swir_use = swir1_idx if swir1_idx > 0 else swir2_idx
+            s_swir_use = s_swir1_idx if s_swir1_idx > 0 else s_swir2_idx
+            rn, rsw = obt_banda(n_idx, s_n_idx), obt_banda(u_swir_use, s_swir_use)
             if check_missing(rn, rsw): plot_missing("NDMI")
             else:
                 ndmi = (rn - rsw) / (rn + rsw + 1e-6); p2, p98 = norm_perc(ndmi)
@@ -809,6 +816,8 @@ with st.sidebar:
          presets_satelites["Prisma (L2D)"] = {"escala": 65535.0, "offset": 0.0}
     
     sat_preset = st.selectbox("Seleccionar satélite:", list(presets_satelites.keys()), index=list(presets_satelites.keys()).index("Prisma (L2D)") if "Hiperespectral" in tipo_datos else 0)
+    st.caption("Nota: Si descargas desde Google Earth Engine (GEE), el offset ya viene corregido por defecto (0.0).")
+    
     sat_name = st.text_input("Nombre en gráficos:", sat_preset.split(" (")[0] if sat_preset not in ["Personalizado", "Google Earth Engine (Reflectancia 0-1)", "Google Earth Engine (Escala 10000)"] else "Satélite GEE")
     es_personalizado = (sat_preset == "Personalizado")
     
@@ -833,8 +842,9 @@ with st.sidebar:
             u_r = st.number_input("U-r", min_value=0, value=3, step=1)
             u_re = st.number_input("U-re", min_value=0, value=4, step=1)
             u_n = st.number_input("U-n", min_value=0, value=5, step=1)
-            u_swir = st.number_input("U-swir", min_value=0, value=0, step=1)
-            bandas_config['uas'] = [u_b, u_g, u_r, u_re, u_n, u_swir]
+            u_swir1 = st.number_input("U-swir 1", min_value=0, value=0, step=1)
+            u_swir2 = st.number_input("U-swir 2", min_value=0, value=0, step=1)
+            bandas_config['uas'] = [u_b, u_g, u_r, u_re, u_n, u_swir1, u_swir2]
         with c2: 
             st.markdown("**Satélite**")
             s_b = st.number_input("S-b", min_value=0, value=1, step=1)
@@ -842,8 +852,9 @@ with st.sidebar:
             s_r = st.number_input("S-r", min_value=0, value=3, step=1)
             s_re = st.number_input("S-re", min_value=0, value=4, step=1)
             s_n = st.number_input("S-n", min_value=0, value=5, step=1)
-            s_swir = st.number_input("S-swir", min_value=0, value=6, step=1)
-            bandas_config['sat'] = [s_b, s_g, s_r, s_re, s_n, s_swir]
+            s_swir1 = st.number_input("S-swir 1", min_value=0, value=6, step=1)
+            s_swir2 = st.number_input("S-swir 2", min_value=0, value=7, step=1)
+            bandas_config['sat'] = [s_b, s_g, s_r, s_re, s_n, s_swir1, s_swir2]
     else:
         st.info("Para datos hiperespectrales puros, la plataforma leerá las bandas automáticamente. El visor espacial operará en modo exploración (banda a banda).")
 
@@ -1000,7 +1011,7 @@ if st.session_state.get("analisis_listo"):
                         
                     if tipo_datos_sesion == "Multiespectral (dron/satélite)":
                         s_sel_names = []
-                        if d['has_uas']: s_sel_names.append("Uas")
+                        if d['has_uas'] and tipo_datos_sesion == "Multiespectral (dron/satélite)": s_sel_names.append("Uas")
                         if d['has_sat']: s_sel_names.append("Satélite")
                         s_sel = st.tabs(s_sel_names)
                         ayuda_indices = {
@@ -1043,7 +1054,7 @@ if st.session_state.get("analisis_listo"):
                             df_uas_nat = d['df_firmas'][d['df_firmas']['Sensor'] == 'Uas (nativo)'].copy()
                             if not df_uas_nat.empty:
                                 fig_todas_uas = px.line(df_uas_nat, x="Banda", y="Reflectancia", color="Cobertura", color_discrete_map=st.session_state.color_map, markers=True, title="Resolución nativa dron")
-                                fig_todas_uas.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir"], showgrid=True, gridcolor='LightGray')
+                                fig_todas_uas.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
                                     
                                 fig_todas_uas.update_traces(line=dict(width=2), marker=dict(size=8))
                                 fig_todas_uas.update_layout(template="simple_white", height=550, plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None))
@@ -1051,21 +1062,21 @@ if st.session_state.get("analisis_listo"):
                                 st.plotly_chart(fig_todas_uas, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}})
                                 
                                 buf_uas = export_formal_general(df_uas_nat, 'Uas (nativo)', tipo_datos_sesion, st.session_state.color_map)
-                                st.download_button("Descargar imagen", buf_uas, f"Firmas_UAS_{name}.png", "image/png", use_container_width=True)
+                                st.download_button("Descargar imagen", buf_uas, f"Firmas_UAS_{name}.png", "image/png", use_container_width=True, key=f"dl_gen_uas_{name}")
                                 
                         with col_gen2:
                             if d['has_sat']:
                                 df_sat = d['df_firmas'][d['df_firmas']['Sensor'] == sat_name_sesion].copy()
                                 if not df_sat.empty:
                                     fig_todas_sat = px.line(df_sat, x="Banda", y="Reflectancia", color="Cobertura", color_discrete_map=st.session_state.color_map, markers=True, title=f"Resolución {sat_name_sesion}")
-                                    fig_todas_sat.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir"], showgrid=True, gridcolor='LightGray')
+                                    fig_todas_sat.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
                                     fig_todas_sat.update_traces(marker=dict(size=8), line=dict(width=2))
                                     fig_todas_sat.update_layout(template="simple_white", height=550, plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None))
                                     fig_todas_sat.update_yaxes(showgrid=True, gridcolor='LightGray')
                                     st.plotly_chart(fig_todas_sat, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}})
                                     
                                     buf_sat = export_formal_general(df_sat, sat_name_sesion, tipo_datos_sesion, st.session_state.color_map)
-                                    st.download_button("Descargar imagen", buf_sat, f"Firmas_SAT_{name}.png", "image/png", use_container_width=True)
+                                    st.download_button("Descargar imagen", buf_sat, f"Firmas_SAT_{name}.png", "image/png", use_container_width=True, key=f"dl_gen_sat_{name}")
                     else:
                         if d['has_sat']:
                             df_sat = d['df_firmas'][d['df_firmas']['Sensor'] == sat_name_sesion].copy()
@@ -1086,7 +1097,7 @@ if st.session_state.get("analisis_listo"):
                                     st.plotly_chart(fig_todas_sat, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}})
                                     
                                     buf_sat = export_formal_general(df_sat, sat_name_sesion, tipo_datos_sesion, st.session_state.color_map)
-                                    st.download_button("Descargar imagen", buf_sat, f"Firmas_SAT_{name}.png", "image/png", use_container_width=True)
+                                    st.download_button("Descargar imagen", buf_sat, f"Firmas_SAT_{name}.png", "image/png", use_container_width=True, key=f"dl_gen_hs_{name}")
 
                     st.markdown("---")
                     st.markdown("### Análisis individual por cobertura")
@@ -1124,7 +1135,7 @@ if st.session_state.get("analisis_listo"):
                                 st.write(" ") 
                                 st.write(" ")
                                 buf_box = export_formal_boxplot(df_ind_filt, idx_sel, sat_name_sesion)
-                                st.download_button("Descargar imagen", buf_box, f"Boxplot_{idx_sel}_{name}.png", "image/png", use_container_width=True)
+                                st.download_button("Descargar imagen", buf_box, f"Boxplot_{idx_sel}_{name}.png", "image/png", use_container_width=True, key=f"dl_box_{name}_{idx_sel}")
 
                             st.markdown(f"**Promedio calculado de {idx_sel} por cobertura**")
                             df_mean = df_ind_filt.groupby(['Cobertura', 'Sensor'])['Valor'].mean().reset_index()
@@ -1168,7 +1179,7 @@ if st.session_state.get("analisis_listo"):
                                         with cols[i%3]: 
                                             st.plotly_chart(fig_c, width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
                                             buf_scat = export_formal_scatter(df_sub, f"Regresión radiométrica: {c}", r2_g)
-                                            st.download_button("Descargar imagen", buf_scat, f"Regresion_{c}.png", "image/png", use_container_width=True, key=f"dl_reg_{name}_{c}")
+                                            st.download_button("Descargar imagen", buf_scat, f"Regresion_{c}.png", "image/png", use_container_width=True, key=f"dl_reg_b_{name}_{c}")
                             else: st.warning("Seleccione al menos una banda espectral para procesar la estadística comparativa.")
 
     # --- Pestaña comparación global ---
@@ -1188,7 +1199,7 @@ if st.session_state.get("analisis_listo"):
                              fig = px.line(df_c, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"Uas nativo: {c}")
                              fig.update_traces(line=dict(width=2), marker=dict(size=8))
                              fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
-                             fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir"], showgrid=True, gridcolor='LightGray')
+                             fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
                              fig.update_yaxes(showgrid=True, gridcolor='LightGray')
                              with cols[i%3]: st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
                  with gt2:
@@ -1199,7 +1210,7 @@ if st.session_state.get("analisis_listo"):
                              fig = px.line(df_c, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"Satélite: {c}")
                              fig.update_traces(line=dict(width=2), marker=dict(size=8))
                              fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
-                             fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir"], showgrid=True, gridcolor='LightGray')
+                             fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
                              fig.update_yaxes(showgrid=True, gridcolor='LightGray')
                              with cols[i%3]: st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}})
                  with gt3:
