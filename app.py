@@ -424,7 +424,7 @@ def inicializar_base(uas_file, sat_file, master_crs, master_gdf, col_clase, tipo
 
     return data
 
-def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, bandas_config, sat_name):
+def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, uas_scale, uas_offset, bandas_config, sat_name):
     random.seed(42)
     np.random.seed(42)
     
@@ -520,8 +520,9 @@ def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, bandas_config, 
         muestras_uas_10m = None
         
         if uas_raw_src and data_dict['tipo_datos'] == "Multiespectral (dron/satélite)":
-            muestras_uas_nat = np.array(list(uas_raw_src.sample(coordenadas))).astype(float)
-            if nodata_uas_raw is not None: muestras_uas_nat[muestras_uas_nat == nodata_uas_raw] = np.nan
+            muestras_uas_nat_crudo = np.array(list(uas_raw_src.sample(coordenadas))).astype(float)
+            if nodata_uas_raw is not None: muestras_uas_nat_crudo[muestras_uas_nat_crudo == nodata_uas_raw] = np.nan
+            muestras_uas_nat = (muestras_uas_nat_crudo + uas_offset) / uas_scale
             firma_uas_nat = np.nanmean(muestras_uas_nat, axis=0)
             
             for b in range(uas_raw_src.count):
@@ -533,8 +534,9 @@ def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, bandas_config, 
             datos_indices.extend(extraer_indices(muestras_uas_nat, uas_idx_map, 'Uas (nativo)', clase_actual))
         
         if uas_10m_src and data_dict['tipo_datos'] == "Multiespectral (dron/satélite)":
-            muestras_uas_10m = np.array(list(uas_10m_src.sample(coordenadas))).astype(float)
-            if nodata_uas_10m is not None: muestras_uas_10m[muestras_uas_10m == nodata_uas_10m] = np.nan
+            muestras_uas_10m_crudo = np.array(list(uas_10m_src.sample(coordenadas))).astype(float)
+            if nodata_uas_10m is not None: muestras_uas_10m_crudo[muestras_uas_10m_crudo == nodata_uas_10m] = np.nan
+            muestras_uas_10m = (muestras_uas_10m_crudo + uas_offset) / uas_scale
             firma_uas_10m = np.nanmean(muestras_uas_10m, axis=0)
             for b in range(uas_10m_src.count):
                 if (b+1) in band_names_uas_map: 
@@ -630,7 +632,7 @@ def pre_generar_graficos(df_firmas, sat_name, tipo_datos, color_map):
         
     return pre_firmas, pre_firmas_plt
 
-def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, bandas_config, sat_scale, sat_offset, escena_name, banda_sel=1):
+def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, bandas_config, sat_scale, sat_offset, uas_scale, uas_offset, escena_name, banda_sel=1):
     is_sat = (sensor_sel == "Satélite")
     base_path = data_dict['uas_path_1m'] if data_dict['has_uas'] else data_dict['sat_clip_path']
     
@@ -651,11 +653,14 @@ def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, bandas_config, sat_scale
             if not is_sat and data_dict['has_uas']: 
                 if 0 < idx_u <= base_src.count:
                     out = base_src.read(int(idx_u)).astype(float)
+                    no_data_mask = (out <= 0)
+                    out = (out + uas_offset) / uas_scale
+                    out[no_data_mask] = np.nan
             elif is_sat and data_dict['has_sat']:
                 with rasterio.open(data_dict['sat_clip_path']) as ss:
                     if 0 < idx_s <= ss.count: 
                         reproject(rasterio.band(ss, int(idx_s)), out, src_transform=ss.transform, src_crs=ss.crs, dst_transform=base_src.transform, dst_crs=base_src.crs, resampling=Resampling.bilinear)
-                        no_data_mask = (out == 0)
+                        no_data_mask = (out <= 0)
                         out = (out + sat_offset) / sat_scale
                         out[no_data_mask] = np.nan
             out[master_mask] = np.nan
@@ -743,7 +748,7 @@ def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, bandas_config, sat_scale
         fig.subplots_adjust(left=0.02, right=0.98, wspace=0.1)
         buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight', facecolor='white'); plt.close(fig); return buf.getvalue()
 
-def generar_todos_pre_mapas(data_dict, sat_scale, sat_offset, bandas_config, escena_name):
+def generar_todos_pre_mapas(data_dict, sat_scale, sat_offset, uas_scale, uas_offset, bandas_config, escena_name):
     pre_mapas = {}
     modos_pre = ["Rgb (color real)", "Falso color (nir-r-g)", "Ndvi", "Ndwi", "Mndwi", "Ndmi"]
     sensores_pre = []
@@ -752,7 +757,7 @@ def generar_todos_pre_mapas(data_dict, sat_scale, sat_offset, bandas_config, esc
     
     for sensor in sensores_pre:
         for modo in modos_pre:
-            pre_mapas[f"{sensor}_{modo}"] = generar_mapa_crudo(data_dict, sensor, modo, bandas_config, sat_scale, sat_offset, escena_name)
+            pre_mapas[f"{sensor}_{modo}"] = generar_mapa_crudo(data_dict, sensor, modo, bandas_config, sat_scale, sat_offset, uas_scale, uas_offset, escena_name)
     return pre_mapas
 
 # -----------------------------
@@ -800,11 +805,11 @@ with st.sidebar:
                  })
             
     st.markdown("---")
-    st.markdown("**3. Ajuste radiométrico satelital**")
+    st.markdown("**3. Ajustes radiométricos (Escalas y Offsets)**")
     
     presets_satelites = {
-        "Google Earth Engine (Reflectancia 0-1)": {"escala": 1.0, "offset": 0.0},
         "Google Earth Engine (Escala 10000)": {"escala": 10000.0, "offset": 0.0},
+        "Google Earth Engine (Reflectancia 0-1)": {"escala": 1.0, "offset": 0.0},
         "Sentinel-2 (L2A post-2022)": {"escala": 10000.0, "offset": -1000.0},
         "Sentinel-2 (L2A pre-2022)": {"escala": 10000.0, "offset": 0.0},
         "Landsat 8/9 (Collection 2 Level 2)": {"escala": 36363.636, "offset": -7272.727},
@@ -815,17 +820,25 @@ with st.sidebar:
     if "Hiperespectral" in tipo_datos:
          presets_satelites["Prisma (L2D)"] = {"escala": 65535.0, "offset": 0.0}
     
-    sat_preset = st.selectbox("Seleccionar satélite:", list(presets_satelites.keys()), index=list(presets_satelites.keys()).index("Prisma (L2D)") if "Hiperespectral" in tipo_datos else 0)
-    st.caption("Nota: Si descargas desde Google Earth Engine (GEE), el offset ya viene corregido por defecto (0.0).")
+    st.markdown("*Satélite*")
+    sat_preset = st.selectbox("Seleccionar sensor satelital:", list(presets_satelites.keys()), index=list(presets_satelites.keys()).index("Prisma (L2D)") if "Hiperespectral" in tipo_datos else 0)
+    st.caption("Nota: Las imágenes Sentinel-2 desde GEE generalmente vienen en escala 10.000 con offset 0.0")
     
     sat_name = st.text_input("Nombre en gráficos:", sat_preset.split(" (")[0] if sat_preset not in ["Personalizado", "Google Earth Engine (Reflectancia 0-1)", "Google Earth Engine (Escala 10000)"] else "Satélite GEE")
     es_personalizado = (sat_preset == "Personalizado")
     
     c_s1, c_s2 = st.columns(2)
     with c_s1: 
-        sat_scale = st.number_input("Factor de escala", value=presets_satelites[sat_preset]["escala"], format="%.3f", disabled=not es_personalizado)
+        sat_scale = st.number_input("Escala Satélite", value=presets_satelites[sat_preset]["escala"], format="%.3f", disabled=not es_personalizado)
     with c_s2: 
-        sat_offset = st.number_input("Offset (desplazamiento)", value=presets_satelites[sat_preset]["offset"], format="%.3f", disabled=not es_personalizado)
+        sat_offset = st.number_input("Offset Satélite", value=presets_satelites[sat_preset]["offset"], format="%.3f", disabled=not es_personalizado)
+
+    st.markdown("*Dron (UAS)*")
+    c_u1, c_u2 = st.columns(2)
+    with c_u1: 
+        uas_scale = st.number_input("Escala Dron", value=1.0, format="%.3f")
+    with c_u2: 
+        uas_offset = st.number_input("Offset Dron", value=0.0, format="%.3f")
     
     st.markdown("---")
     
@@ -934,7 +947,7 @@ if st.session_state.get("analisis_listo"):
                     
                     if has_vector and d.get('gdf') is not None:
                         status_text.info("Procesamiento: muestreo radiométrico estocástico iniciado...")
-                        df_f, df_c, df_i = calcular_firmas(d, col_clase_input, sat_scale, sat_offset, st.session_state.bandas_config, sat_name_sesion)
+                        df_f, df_c, df_i = calcular_firmas(d, col_clase_input, sat_scale, sat_offset, uas_scale, uas_offset, st.session_state.bandas_config, sat_name_sesion)
                         d['df_firmas'], d['df_corr'], d['df_indices'] = df_f, df_c, df_i
                         pbar.progress(33)
                         status_text.info("Procesamiento: modelado de firmas espectrales y reportes...")
@@ -943,11 +956,11 @@ if st.session_state.get("analisis_listo"):
                         pbar.progress(50)
                         
                     status_text.info("Procesamiento: renderización espacial...")
-                    d['pre_m'] = generar_todos_pre_mapas(d, sat_scale, sat_offset, st.session_state.bandas_config, name); pbar.progress(100)
+                    d['pre_m'] = generar_todos_pre_mapas(d, sat_scale, sat_offset, uas_scale, uas_offset, st.session_state.bandas_config, name); pbar.progress(100)
                 st.session_state.data_escenas[name] = d; loading_ph.empty()
             
             if 'df_firmas' not in d and has_vector and d.get('gdf') is not None:
-                df_f, df_c, df_i = calcular_firmas(d, col_clase_input, sat_scale, sat_offset, st.session_state.bandas_config, sat_name_sesion)
+                df_f, df_c, df_i = calcular_firmas(d, col_clase_input, sat_scale, sat_offset, uas_scale, uas_offset, st.session_state.bandas_config, sat_name_sesion)
                 d['df_firmas'], d['df_corr'], d['df_indices'] = df_f, df_c, df_i
                 d['pre_p_f'], d['pre_p_plt'] = pre_generar_graficos(df_f, sat_name_sesion, tipo_datos_sesion, st.session_state.color_map)
                 st.session_state.data_escenas[name] = d
@@ -1028,10 +1041,10 @@ if st.session_state.get("analisis_listo"):
                                     with m_tabs[j]: 
                                         if m in ayuda_indices: st.markdown(f"**{m}**", help=ayuda_indices[m])
                                         st.image(d['pre_m'][f"{sensor}_{m}"], width="stretch")
-                                        st.download_button(label="Descargar imagen", data=d['pre_m'][f"{sensor}_{m}"], file_name=f"{sensor}_{m}.png", mime="image/png", key=f"dl_map_{name}_{sensor}_{m}")
+                                        st.download_button(label="Descargar imagen", data=d['pre_m'][f"{sensor}_{m}"], file_name=f"{sensor}_{m}-{name}.png", mime="image/png", key=f"dl_map_{name}_{sensor}_{m}")
                                 with m_tabs[6]:
                                     banda_sel = st.selectbox("Seleccione banda:", range(1, 7), key=f"bp_{name}_{sensor}")
-                                    mapa_puro = generar_mapa_crudo(d, sensor, "Banda individual", st.session_state.bandas_config, sat_scale, sat_offset, name, banda_sel)
+                                    mapa_puro = generar_mapa_crudo(d, sensor, "Banda individual", st.session_state.bandas_config, sat_scale, sat_offset, uas_scale, uas_offset, name, banda_sel)
                                     st.image(mapa_puro, width="stretch")
                     else:
                         st.markdown("### Explorador de bandas hiperespectrales")
@@ -1039,7 +1052,7 @@ if st.session_state.get("analisis_listo"):
                             with rasterio.open(d['sat_clip_path']) as src_h:
                                 max_b = src_h.count
                             banda_sel = st.slider("Deslice para barrer el espectro (n° de banda)", 1, max_b, 1, key=f"slider_h_{name}")
-                            mapa_puro = generar_mapa_crudo(d, "Satélite", "Banda individual", st.session_state.bandas_config, sat_scale, sat_offset, name, banda_sel)
+                            mapa_puro = generar_mapa_crudo(d, "Satélite", "Banda individual", st.session_state.bandas_config, sat_scale, sat_offset, uas_scale, uas_offset, name, banda_sel)
                             st.image(mapa_puro, width="stretch")
                 tab_idx += 1
             
