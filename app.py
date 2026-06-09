@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from rasterio.mask import mask
 import tempfile, zipfile, os, re, io
+import base64
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 from rasterio.warp import calculate_default_transform, reproject, Resampling
@@ -26,8 +27,27 @@ st.set_page_config(page_title="Visualizador de datos espaciales y multitemporale
 st.title("Visualizador de datos espaciales y multitemporales")
 
 # -----------------------------
-# 1. Funciones principales
+# 1. Funciones principales y de interfaz personalizadas
 # -----------------------------
+def custom_download_button(data, filename, text="Descargar imagen", mime="image/png"):
+    """
+    Botón de descarga HTML puro (Base64) que evita el re-run completo de Streamlit.
+    """
+    b64 = base64.b64encode(data).decode()
+    href = f'data:{mime};base64,{b64}'
+    button_html = f"""
+    <a href="{href}" download="{filename}" style="
+        display: block; width: 100%; text-align: center; padding: 0.5rem 1rem;
+        background-color: #ffffff; color: #31333F; border: 1px solid #d5d9e0;
+        border-radius: 0.5rem; text-decoration: none; font-family: sans-serif;
+        font-size: 1rem; transition: all 0.2s ease-in-out; margin-bottom: 1rem;
+    " onmouseover="this.style.borderColor='#FF4B4B'; this.style.color='#FF4B4B'" 
+       onmouseout="this.style.borderColor='#d5d9e0'; this.style.color='#31333F'">
+       {text}
+    </a>
+    """
+    st.markdown(button_html, unsafe_allow_html=True)
+
 @st.cache_data
 def process_vector_file(uploaded_file):
     if uploaded_file.name.endswith('.zip'):
@@ -170,7 +190,7 @@ def export_formal_signature(df, cob, sat_name, tipo_datos, color_map, y_min, y_m
     fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
     sensores = df['Sensor'].unique() if 'Sensor' in df.columns else ['Escena Global']
     
-    if 'Escena' in df.columns: # Para comparación global
+    if 'Escena' in df.columns: 
         escenas = df['Escena'].unique()
         for escena in escenas:
             df_e = df[df['Escena'] == escena].copy()
@@ -180,7 +200,7 @@ def export_formal_signature(df, cob, sat_name, tipo_datos, color_map, y_min, y_m
                 ax.plot(df_e['Wavelength'], df_e['Reflectancia'], label=escena, linewidth=2)
             else:
                 ax.plot(df_e['Banda'], df_e['Reflectancia'], label=escena, marker='o', linewidth=2)
-    else: # Por escena individual
+    else: 
         for sensor in sensores:
             df_s = df[df['Sensor'] == sensor].copy()
             if tipo_datos == "Multiespectral (dron/satélite)":
@@ -428,6 +448,7 @@ def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, uas_scale, uas_
             if G is not None and N is not None: res['Ndwi'] = (G - N) / (G + N + 1e-6)
             if G is not None and SW is not None: res['Mndwi'] = (G - SW) / (G + SW + 1e-6)
             if N is not None and SW is not None: res['Ndmi'] = (N - SW) / (N + SW + 1e-6)
+            if N is not None and R is not None: res['Savi'] = ((N - R) / (N + R + 0.5)) * 1.5
         return res
 
     def extraer_indices(muestras, idx_map, sensor_name, clase):
@@ -609,6 +630,14 @@ def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, bandas_config, sat_scale
                 im = ax.imshow(ndmi, cmap='BrBG', vmin=p2, vmax=p98, extent=ext, interpolation='bicubic')
                 fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02).set_label('Ndmi')
 
+        elif vis_mode == "Savi":
+            rn, rr = obt_banda(n_idx, s_n_idx), obt_banda(r_idx, s_r_idx)
+            if check_missing(rn, rr): plot_missing("SAVI")
+            else:
+                savi = ((rn - rr) / (rn + rr + 0.5)) * 1.5; p2, p98 = norm_perc(savi)
+                im = ax.imshow(savi, cmap='RdYlGn', vmin=p2, vmax=p98, extent=ext, interpolation='bicubic')
+                fig.colorbar(im, ax=ax, shrink=0.7, pad=0.02).set_label('Savi')
+
         elif "color" in vis_mode.lower() or "rgb" in vis_mode.lower():
             is_falso = "falso" in vis_mode.lower()
             b1_u, b1_s = (n_idx, s_n_idx) if is_falso else (r_idx, s_r_idx)
@@ -644,7 +673,7 @@ def generar_mapa_crudo(data_dict, sensor_sel, vis_mode, bandas_config, sat_scale
 
 def generar_todos_pre_mapas(data_dict, sat_scale, sat_offset, uas_scale, uas_offset, bandas_config, escena_name):
     pre_mapas = {}
-    modos_pre = ["Rgb (color real)", "Falso color (nir-r-g)", "Ndvi", "Ndwi", "Mndwi", "Ndmi"]
+    modos_pre = ["Rgb (color real)", "Falso color (nir-r-g)", "Ndvi", "Ndwi", "Mndwi", "Ndmi", "Savi"]
     sensores_pre = []
     if data_dict['has_uas'] and data_dict['tipo_datos'] == "Multiespectral (dron/satélite)": sensores_pre.append("Uas")
     if data_dict['has_sat'] and data_dict['tipo_datos'] == "Multiespectral (dron/satélite)": sensores_pre.append("Satélite")
@@ -729,7 +758,6 @@ def pre_generar_graficos(df_firmas, sat_name, tipo_datos, color_map, escena_name
     return pre_firmas, pre_firmas_plt, fig_gen_uas, buf_gen_uas, fig_gen_sat, buf_gen_sat, fig_gen_hs, buf_gen_hs
 
 def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos_sesion, color_map):
-    # Función para generar y guardar los gráficos de la pestaña global
     res = {}
     cobs = all_f['Cobertura'].unique()
     names = all_f['Escena'].unique()
@@ -739,7 +767,6 @@ def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos
     y_padding_g = (y_max_g - y_min_g) * 0.05
     y_range_g = [max(0, y_min_g - y_padding_g), y_max_g + y_padding_g]
 
-    # Gráficos Evolución UAS/Satélite
     if tipo_datos_sesion == "Multiespectral (dron/satélite)":
         for c in cobs:
             df_c_uas = all_f[(all_f['Cobertura'] == c) & (all_f['Sensor'] == 'Uas (nativo)')]
@@ -755,7 +782,6 @@ def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos
             if not df_c_hs.empty:
                 res[f'buf_glob_hs_{c}'] = export_formal_signature(df_c_hs, c, sat_name_sesion, tipo_datos_sesion, color_map, y_range_g[0], y_range_g[1], f"(Evolución {sat_name_sesion})")
 
-    # Gráficos Regresión Global
     if all_c_filt is not None and not all_c_filt.empty:
         r2_list = []
         for n in names:
@@ -768,7 +794,6 @@ def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos
         
         if r2_list:
             df_r2_glob = pd.DataFrame(r2_list)
-            # Para el bar chart global
             fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
             df_pivot = df_r2_glob.pivot(index='Cobertura', columns='Escena', values='R2')
             df_pivot.plot(kind='bar', ax=ax, cmap='PuBuGn')
@@ -803,7 +828,7 @@ with st.sidebar:
             st.session_state.raw_gdf = preview_gdf
             st.session_state.has_vector = True
             resumen_columnas = [{"Columna": c, "Ejemplos": ", ".join(map(str, preview_gdf[c].dropna().unique()[:3]))} for c in preview_gdf.columns if c != 'geometry']
-            st.dataframe(pd.DataFrame(resumen_columnas), hide_index=True)
+            st.dataframe(pd.DataFrame(resumen_columnas), hide_index=True, width="stretch")
             st.session_state.col_clase = st.selectbox("Columna clase:", [c for c in preview_gdf.columns if c != 'geometry'], key='selector_clase')
         else:
             st.session_state.has_vector = False
@@ -838,7 +863,7 @@ with st.sidebar:
          presets_satelites["Prisma (L2D)"] = {"escala": 65535.0, "offset": 0.0}
     
     st.markdown("*Satélite*")
-    sat_preset = st.selectbox("Seleccionar sensor satelital:", list(presets_satelites.keys()), index=list(presets_satelites.keys()).index("Prisma (L2D)") if "Hiperespectral" in tipo_datos else 2)
+    sat_preset = st.selectbox("Seleccionar sensor satelital:", list(presets_satelites.keys()), index=list(presets_satelites.keys()).index("Prisma (L2D)") if "Hiperespectral" in tipo_datos else 0)
     st.caption("Nota: GEE usa Escala 10000. Si tu imagen es Sentinel-2 desde Copérnico (2022 en adelante), usa el preset post-2022 (offset -1000).")
     
     sat_name = st.text_input("Nombre en gráficos:", sat_preset.split(" (")[0] if sat_preset not in ["Personalizado", "Google Earth Engine (Reflectancia 0-1)", "Google Earth Engine (Escala 10000)"] else "Satélite GEE")
@@ -962,7 +987,6 @@ if st.session_state.get("analisis_listo"):
                         status_text.info("Procesamiento: renderización espacial...")
                         d['pre_m'] = generar_todos_pre_mapas(d, sat_scale, sat_offset, uas_scale, uas_offset, st.session_state.bandas_config, name)
                     
-                    # Generación de cache de índices para descargas rápidas
                     d['idx_buffers'] = {}
                     d['idx_scat_buffers'] = {}
                     if not df_i.empty:
@@ -975,7 +999,6 @@ if st.session_state.get("analisis_listo"):
                                     _, r2_idx = calcular_regresion_limpia(df_c_idx_filt)
                                     d['idx_scat_buffers'][idx_sel] = export_formal_scatter(df_c_idx_filt, f"Relación {idx_sel}: {name}", r2_idx, es_indice=True)
                     
-                    # Generación de cache de regresiones para descargas rápidas
                     d['reg_buffers'] = {}
                     if not df_c.empty:
                         for c in df_c['Cobertura'].unique():
@@ -1034,7 +1057,7 @@ if st.session_state.get("analisis_listo"):
                                 df_stats['label_text'] = df_stats.apply(lambda row: f"{row['area_m2']/10000:.2f} ha<br>{row['area_m2']:,.1f} m²", axis=1)
                                 fig_pie = px.pie(df_stats, values='area_m2', names=col_clase_input, hole=0.4, color=col_clase_input, color_discrete_map=st.session_state.color_map, custom_data=['label_text'])
                                 fig_pie.update_traces(hovertemplate="<b>%{label}</b><br>%{customdata[0]}")
-                                st.plotly_chart(fig_pie, use_container_width=True, key=f"pie_{name}")
+                                st.plotly_chart(fig_pie, width="stretch", key=f"pie_{name}")
                             else:
                                 st.info("El análisis estadístico se encuentra deshabilitado por ausencia de archivo vectorial.")
                         st.markdown("---")
@@ -1046,23 +1069,26 @@ if st.session_state.get("analisis_listo"):
                         s_sel = st.tabs(s_sel_names)
                         for i, sensor in enumerate(s_sel_names):
                             with s_sel[i]:
-                                m_tabs = st.tabs(["Rgb", "Falso color", "Ndvi", "Ndwi", "Mndwi", "Ndmi", "Banda individual"])
-                                modos_cartografia = ["Rgb (color real)", "Falso color (nir-r-g)", "Ndvi", "Ndwi", "Mndwi", "Ndmi"]
+                                m_tabs = st.tabs(["Rgb", "Falso color", "Ndvi", "Ndwi", "Mndwi", "Ndmi", "Savi", "Banda individual"])
+                                modos_cartografia = ["Rgb (color real)", "Falso color (nir-r-g)", "Ndvi", "Ndwi", "Mndwi", "Ndmi", "Savi"]
                                 for j, m in enumerate(modos_cartografia):
                                     with m_tabs[j]: 
-                                        st.image(d['pre_m'][f"{sensor}_{m}"], use_container_width=True)
-                                        st.download_button(label="Descargar imagen", data=d['pre_m'][f"{sensor}_{m}"], file_name=f"Mapa_{m}_{sensor}_{name}.png", mime="image/png", key=f"dl_map_{name}_{sensor}_{m}")
-                                with m_tabs[6]:
-                                    banda_sel = st.selectbox("Seleccione banda:", range(1, 7), key=f"bp_{name}_{sensor}")
+                                        st.image(d['pre_m'][f"{sensor}_{m}"], width="stretch")
+                                        custom_download_button(d['pre_m'][f"{sensor}_{m}"], f"Mapa_{m}_{sensor}_{name}.png")
+                                        
+                                with m_tabs[7]:
+                                    banda_sel = st.selectbox("Seleccione banda:", range(1, 8), key=f"bp_{name}_{sensor}")
                                     mapa_puro = generar_mapa_crudo(d, sensor, "Banda individual", st.session_state.bandas_config, sat_scale, sat_offset, uas_scale, uas_offset, name, banda_sel)
-                                    st.image(mapa_puro, use_container_width=True)
+                                    st.image(mapa_puro, width="stretch")
+                                    custom_download_button(mapa_puro, f"Mapa_Banda_{banda_sel}_{sensor}_{name}.png")
                     else:
                         st.markdown("### Explorador de bandas hiperespectrales")
                         if d['has_sat']:
                             with rasterio.open(d['sat_clip_path']) as src_h: max_b = src_h.count
                             banda_sel = st.slider("Deslice para barrer el espectro (n° de banda)", 1, max_b, 1, key=f"slider_h_{name}")
                             mapa_puro = generar_mapa_crudo(d, "Satélite", "Banda individual", st.session_state.bandas_config, sat_scale, sat_offset, uas_scale, uas_offset, name, banda_sel)
-                            st.image(mapa_puro, use_container_width=True)
+                            st.image(mapa_puro, width="stretch")
+                            custom_download_button(mapa_puro, f"Mapa_Banda_{banda_sel}_Hiperespectral_{name}.png")
                 tab_idx += 1
             
             if has_vector and d.get('df_firmas') is not None:
@@ -1073,18 +1099,18 @@ if st.session_state.get("analisis_listo"):
                         col_gen1, col_gen2 = st.columns(2)
                         with col_gen1:
                             if d.get('fig_gen_uas') is not None:
-                                st.plotly_chart(d['fig_gen_uas'], use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_uas_{name}")
-                                st.download_button("Descargar imagen", d['buf_gen_uas'], f"Firmas_UAS_{name}.png", "image/png", use_container_width=True, key=f"dl_gen_uas_{name}")
+                                st.plotly_chart(d['fig_gen_uas'], width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_uas_{name}")
+                                custom_download_button(d['buf_gen_uas'], f"Firmas_UAS_{name}.png")
                         with col_gen2:
                             if d.get('fig_gen_sat') is not None:
-                                st.plotly_chart(d['fig_gen_sat'], use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_sat_{name}")
-                                st.download_button("Descargar imagen", d['buf_gen_sat'], f"Firmas_{sat_name_sesion}_{name}.png", "image/png", use_container_width=True, key=f"dl_gen_sat_{name}")
+                                st.plotly_chart(d['fig_gen_sat'], width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_sat_{name}")
+                                custom_download_button(d['buf_gen_sat'], f"Firmas_{sat_name_sesion}_{name}.png")
                     else:
                         if d.get('fig_gen_hs') is not None:
                             col_vacia1, col_centro, col_vacia2 = st.columns([1, 6, 1])
                             with col_centro:
-                                st.plotly_chart(d['fig_gen_hs'], use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_hs_{name}")
-                                st.download_button("Descargar imagen", d['buf_gen_hs'], f"Firmas_Hiperespectral_{name}.png", "image/png", use_container_width=True, key=f"dl_gen_hs_{name}")
+                                st.plotly_chart(d['fig_gen_hs'], width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_hs_{name}")
+                                custom_download_button(d['buf_gen_hs'], f"Firmas_Hiperespectral_{name}.png")
 
                     st.markdown("---")
                     st.markdown("### Análisis individual por cobertura")
@@ -1092,16 +1118,16 @@ if st.session_state.get("analisis_listo"):
                     for i, c in enumerate(cobs):
                         if c in d['pre_p_f']:
                             with cols[i % 3]:
-                                st.plotly_chart(d['pre_p_f'][c], use_container_width=True, config={'toImageButtonOptions': {'format': 'png', 'filename': f'Firma_{c}'}}, key=f"ind_{name}_{c}")
-                                st.download_button("Descargar imagen", d['pre_p_plt'][c], f"Firma_{c}_{name}.png", "image/png", use_container_width=True, key=f"dl_ind_{name}_{c}")
+                                st.plotly_chart(d['pre_p_f'][c], width="stretch", config={'toImageButtonOptions': {'format': 'png', 'filename': f'Firma_{c}'}}, key=f"ind_{name}_{c}")
+                                custom_download_button(d['pre_p_plt'][c], f"Firma_{c}_{name}.png")
 
                     with st.expander("Centro de descargas (matrices numéricas)", expanded=False):
                         col_dl1, col_dl2, col_dl3 = st.columns(3)
-                        col_dl1.download_button("Descargar firmas (csv)", d['df_firmas'].to_csv(index=False).encode('utf-8'), f"firmas_{name}.csv", "text/csv", key=f"csv_firmas_{name}")
+                        with col_dl1: custom_download_button(d['df_firmas'].to_csv(index=False).encode('utf-8'), f"firmas_{name}.csv", text="Descargar firmas (CSV)", mime="text/csv")
                         if not d['df_corr'].empty:
-                            col_dl2.download_button("Descargar correlación (csv)", d['df_corr'].to_csv(index=False).encode('utf-8'), f"correlacion_{name}.csv", "text/csv", key=f"csv_corr_{name}")
+                            with col_dl2: custom_download_button(d['df_corr'].to_csv(index=False).encode('utf-8'), f"correlacion_{name}.csv", text="Descargar correlación (CSV)", mime="text/csv")
                         if d.get('df_indices') is not None and not d['df_indices'].empty:
-                            col_dl3.download_button("Descargar índices (csv)", d['df_indices'].to_csv(index=False).encode('utf-8'), f"indices_{name}.csv", "text/csv", key=f"csv_ind_{name}")
+                            with col_dl3: custom_download_button(d['df_indices'].to_csv(index=False).encode('utf-8'), f"indices_{name}.csv", text="Descargar índices (CSV)", mime="text/csv")
                 tab_idx += 1
                 
                 if tipo_datos_sesion == "Multiespectral (dron/satélite)":
@@ -1119,16 +1145,16 @@ if st.session_state.get("analisis_listo"):
                             fig_box.update_yaxes(showgrid=True, gridcolor='LightGray')
 
                             c_box_plot, c_box_dl = st.columns([4, 1])
-                            with c_box_plot: st.plotly_chart(fig_box, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"box_{name}_{idx_sel}")
+                            with c_box_plot: st.plotly_chart(fig_box, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"box_{name}_{idx_sel}")
                             with c_box_dl: 
                                 st.write(" "); st.write(" ")
                                 if idx_sel in d['idx_buffers']:
-                                    st.download_button("Descargar imagen", d['idx_buffers'][idx_sel], f"Boxplot_{idx_sel}_{name}.png", "image/png", use_container_width=True, key=f"dl_box_{name}_{idx_sel}")
+                                    custom_download_button(d['idx_buffers'][idx_sel], f"Boxplot_{idx_sel}_{name}.png")
 
                             st.markdown(f"**Promedio calculado de {idx_sel} por cobertura**")
                             df_mean = df_ind_filt.groupby(['Cobertura', 'Sensor'])['Valor'].mean().reset_index()
                             df_pivot = df_mean.pivot(index='Cobertura', columns='Sensor', values='Valor').round(3)
-                            st.dataframe(df_pivot)
+                            st.dataframe(df_pivot, width="stretch")
                             
                             st.markdown("---")
                             st.subheader(f"Relación Dron vs Satélite: {idx_sel}")
@@ -1144,11 +1170,11 @@ if st.session_state.get("analisis_listo"):
                                     fig_idx.update_xaxes(showgrid=True, gridcolor='LightGray'); fig_idx.update_yaxes(showgrid=True, gridcolor='LightGray')
                                     
                                     c_scat_plot, c_scat_dl = st.columns([4, 1])
-                                    with c_scat_plot: st.plotly_chart(fig_idx, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"scat_idx_{name}_{idx_sel}")
+                                    with c_scat_plot: st.plotly_chart(fig_idx, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"scat_idx_{name}_{idx_sel}")
                                     with c_scat_dl:
                                         st.write(" "); st.write(" ")
                                         if idx_sel in d['idx_scat_buffers']:
-                                            st.download_button("Descargar imagen", d['idx_scat_buffers'][idx_sel], f"Dispersion_{idx_sel}_{name}.png", "image/png", use_container_width=True, key=f"dl_scat_idx_{name}_{idx_sel}")
+                                            custom_download_button(d['idx_scat_buffers'][idx_sel], f"Dispersion_{idx_sel}_{name}.png")
                                 else: st.info("No hay suficientes datos superpuestos para generar la regresión de este índice.")
                         else: st.info("No se han registrado índices para el cálculo.")
                     tab_idx += 1
@@ -1172,8 +1198,21 @@ if st.session_state.get("analisis_listo"):
                                     mean_r2 = df_r2['R2'].mean()
                                     fig_r2.add_hline(y=mean_r2, line_dash="dash", line_color="#d62728", annotation_text=f"Promedio: {mean_r2:.3f}", annotation_position="top right")
                                     fig_r2.update_layout(template="simple_white")
-                                    st.plotly_chart(fig_r2, use_container_width=True, config={'toImageButtonOptions': {'format': 'png', 'filename': 'R2_Escena'}}, key=f"bar_r2_{name}")
-                                
+                                    
+                                    c_r2_bar, c_r2_dl = st.columns([4,1])
+                                    with c_r2_bar: st.plotly_chart(fig_r2, width="stretch", config={'toImageButtonOptions': {'format': 'png', 'filename': 'R2_Escena'}}, key=f"bar_r2_{name}")
+                                    with c_r2_dl:
+                                        st.write(" "); st.write(" ")
+                                        fig_b, ax_b = plt.subplots(figsize=(8, 5), dpi=300)
+                                        df_r2.set_index('Cobertura')['R2'].plot(kind='bar', ax=ax_b, color='#1f77b4')
+                                        ax_b.axhline(y=mean_r2, color='red', linestyle='--', label=f'Promedio ({mean_r2:.3f})')
+                                        ax_b.set_title(f"Comparación R² por cobertura - {name}", weight='bold')
+                                        ax_b.set_ylabel("R²")
+                                        ax_b.legend(frameon=True, facecolor='white', edgecolor='black')
+                                        plt.tight_layout()
+                                        buf_b = io.BytesIO(); fig_b.savefig(buf_b, format="png", bbox_inches='tight'); plt.close(fig_b)
+                                        custom_download_button(buf_b.getvalue(), f"R2_Barplot_{name}.png")
+
                                 st.markdown("**Regresiones lineales por cobertura**")
                                 cols = st.columns(3)
                                 for i, c in enumerate(cobs):
@@ -1186,9 +1225,9 @@ if st.session_state.get("analisis_listo"):
                                         fig_c.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
                                         fig_c.update_xaxes(showgrid=True, gridcolor='LightGray'); fig_c.update_yaxes(showgrid=True, gridcolor='LightGray')
                                         with cols[i%3]: 
-                                            st.plotly_chart(fig_c, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"scat_{name}_{c}")
+                                            st.plotly_chart(fig_c, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"scat_{name}_{c}")
                                             if c in d.get('reg_buffers', {}):
-                                                st.download_button("Descargar imagen", d['reg_buffers'][c], f"Regresion_Bandas_{c}_{name}.png", "image/png", use_container_width=True, key=f"dl_reg_b_{name}_{c}")
+                                                custom_download_button(d['reg_buffers'][c], f"Regresion_Bandas_{c}_{name}.png")
                             else: st.warning("Seleccione al menos una banda espectral para procesar la estadística comparativa.")
 
     # --- Pestaña comparación global ---
@@ -1196,7 +1235,6 @@ if st.session_state.get("analisis_listo"):
         with tabs[-1]:
             st.header("Análisis comparativo global multiescena")
             
-            # Solo procesamos la data global si no existe en la sesión
             if 'df_global_all_f' not in st.session_state:
                 with st.spinner("Compilando análisis global..."):
                     all_f = pd.concat([st.session_state.data_escenas[n]['df_firmas'].assign(Escena=n) for n in names if 'df_firmas' in st.session_state.data_escenas[n]])
@@ -1212,7 +1250,6 @@ if st.session_state.get("analisis_listo"):
             glob_buf = st.session_state['global_buffers']
             cobs = all_f['Cobertura'].unique()
 
-            # Global Y-Range
             y_min_g = all_f['Reflectancia'].min()
             y_max_g = all_f['Reflectancia'].max()
             y_padding_g = (y_max_g - y_min_g) * 0.05
@@ -1231,9 +1268,9 @@ if st.session_state.get("analisis_listo"):
                             fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
                             fig.update_yaxes(range=y_range_g, showgrid=True, gridcolor='LightGray')
                             with cols[i % 3]: 
-                                st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_uas_{c}")
+                                st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_uas_{c}")
                                 if f'buf_glob_uas_{c}' in glob_buf:
-                                    st.download_button("Descargar imagen", glob_buf[f'buf_glob_uas_{c}'], f"Evolucion_UAS_{c}.png", "image/png", use_container_width=True, key=f"dl_g_uas_{c}")
+                                    custom_download_button(glob_buf[f'buf_glob_uas_{c}'], f"Evolucion_UAS_{c}.png")
                 with gt2:
                     cols = st.columns(3)
                     for i, c in enumerate(cobs):
@@ -1245,9 +1282,9 @@ if st.session_state.get("analisis_listo"):
                             fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
                             fig.update_yaxes(range=y_range_g, showgrid=True, gridcolor='LightGray')
                             with cols[i % 3]: 
-                                st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_sat_{c}")
+                                st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_sat_{c}")
                                 if f'buf_glob_sat_{c}' in glob_buf:
-                                    st.download_button("Descargar imagen", glob_buf[f'buf_glob_sat_{c}'], f"Evolucion_SAT_{c}.png", "image/png", use_container_width=True, key=f"dl_g_sat_{c}")
+                                    custom_download_button(glob_buf[f'buf_glob_sat_{c}'], f"Evolucion_SAT_{c}.png")
                 with gt3:
                     if all_c is not None:
                         bandas_disp_glob = all_c['Banda'].unique()
@@ -1270,11 +1307,11 @@ if st.session_state.get("analisis_listo"):
                                 fig_r2_glob.update_layout(template="simple_white")
                                 
                                 c_g_r2, c_g_r2_dl = st.columns([4,1])
-                                with c_g_r2: st.plotly_chart(fig_r2_glob, use_container_width=True, config={'toImageButtonOptions': {'format': 'png', 'filename': 'R2_Global'}}, key="glob_bar_r2")
+                                with c_g_r2: st.plotly_chart(fig_r2_glob, width="stretch", config={'toImageButtonOptions': {'format': 'png', 'filename': 'R2_Global'}}, key="glob_bar_r2")
                                 with c_g_r2_dl:
                                     st.write(" "); st.write(" ")
                                     if 'buf_glob_bar_r2' in glob_buf:
-                                        st.download_button("Descargar imagen", glob_buf['buf_glob_bar_r2'], "R2_Global_Barplot.png", "image/png", use_container_width=True, key="dl_g_bar_r2")
+                                        custom_download_button(glob_buf['buf_glob_bar_r2'], "R2_Global_Barplot.png")
 
                                 st.markdown("### Regresiones consolidadas globales por cobertura")
                                 cols = st.columns(3)
@@ -1288,9 +1325,9 @@ if st.session_state.get("analisis_listo"):
                                         fig.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
                                         fig.update_xaxes(showgrid=True, gridcolor='LightGray'); fig.update_yaxes(showgrid=True, gridcolor='LightGray')
                                         with cols[i % 3]: 
-                                            st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_scat_{c}")
+                                            st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_scat_{c}")
                                             if f'buf_glob_scat_{c}' in glob_buf:
-                                                st.download_button("Descargar imagen", glob_buf[f'buf_glob_scat_{c}'], f"Regresion_Global_{c}.png", "image/png", use_container_width=True, key=f"dl_g_scat_{c}")
+                                                custom_download_button(glob_buf[f'buf_glob_scat_{c}'], f"Regresion_Global_{c}.png")
                         else: st.warning("Seleccione al menos una banda espectral para procesar la estadística comparativa.")
             else:
                  gt1 = st.tabs(["Evolución de firmas hiperespectrales"])[0]
@@ -1308,14 +1345,15 @@ if st.session_state.get("analisis_listo"):
                              fig.update_yaxes(range=y_range_g, showgrid=True, gridcolor='LightGray')
                              add_spectral_bands_plotly(fig)
                              with cols[i % 3]: 
-                                 st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_hs_{c}")
+                                 st.plotly_chart(fig, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_hs_{c}")
                                  if f'buf_glob_hs_{c}' in glob_buf:
-                                     st.download_button("Descargar imagen", glob_buf[f'buf_glob_hs_{c}'], f"Evolucion_HS_{c}.png", "image/png", use_container_width=True, key=f"dl_g_hs_{c}")
+                                     custom_download_button(glob_buf[f'buf_glob_hs_{c}'], f"Evolucion_HS_{c}.png")
 
             with st.expander("Centro de descargas (consolidado global)", expanded=False):
-                st.download_button("Descargar firmas globales (csv)", all_f.to_csv(index=False).encode('utf-8'), "firmas_globales.csv", "text/csv", key="dl_csv_glob_firmas_all")
+                col_c1, col_c2 = st.columns(2)
+                with col_c1: custom_download_button(all_f.to_csv(index=False).encode('utf-8'), "firmas_globales.csv", text="Descargar firmas globales (CSV)", mime="text/csv")
                 if tipo_datos_sesion == "Multiespectral (dron/satélite)" and all_c is not None:
-                    st.download_button("Descargar correlaciones globales (csv)", all_c.to_csv(index=False).encode('utf-8'), "correlaciones_globales.csv", "text/csv", key="dl_csv_glob_corr_all")
+                    with col_c2: custom_download_button(all_c.to_csv(index=False).encode('utf-8'), "correlaciones_globales.csv", text="Descargar correlaciones globales (CSV)", mime="text/csv")
 else:
     # --- Pantalla de inicio ---
     st.markdown("### Plataforma de Validación Espectral y Multitemporal")
@@ -1323,7 +1361,7 @@ else:
     st.markdown("---")
     col1, col2 = st.columns(2)
     with col1: 
-        st.info("**1. Multiespectral (dron vs satélite)**\n\nEl flujo de trabajo principal. Ideal para extraer índices ecosistémicos (NDVI, MNDWI) y generar modelos de regresión lineal ($R^2$) que certifiquen la correspondencia entre el vuelo del dron y la escena satelital.")
+        st.info("**1. Multiespectral (dron vs satélite)**\n\nEl flujo de trabajo principal. Ideal para extraer índices ecosistémicos (NDVI, MNDWI, SAVI) y generar modelos de regresión lineal ($R^2$) que certifiquen la correspondencia entre el vuelo del dron y la escena satelital.")
     with col2: 
         st.success("**2. Hiperespectral puro**\n\nDesbloquea el análisis de datos masivos. Omite la creación de índices básicos y se enfoca en entregar el espectro electromagnético continuo mediante un explorador de barrido espacial.")
     st.markdown("---")
