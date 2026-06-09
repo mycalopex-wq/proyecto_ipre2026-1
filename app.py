@@ -166,31 +166,45 @@ def add_spectral_bands_plt(ax):
         ax.text((x0+x1)/2, ymax - (ymax-ymin)*0.02, nombre, color=color, ha='center', va='top', fontsize=8, alpha=0.8, weight='bold', zorder=1)
     ax.set_ylim(ymin, ymax)
 
-def export_formal_signature(df, cob, sat_name, tipo_datos, color_map, y_min, y_max):
+def export_formal_signature(df, cob, sat_name, tipo_datos, color_map, y_min, y_max, titulo_extra=""):
     fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
-    sensores = df['Sensor'].unique()
-    for sensor in sensores:
-        df_s = df[df['Sensor'] == sensor].copy()
-        if tipo_datos == "Multiespectral (dron/satélite)":
-            c = {'Uas (10m)': '#1f77b4', 'Uas (nativo)': '#2ca02c', sat_name: '#8c564b'}.get(sensor, 'black')
-            ax.plot(df_s['Banda'], df_s['Reflectancia'], marker='o', color=c, label=sensor, linewidth=2)
-        else:
-            c = color_map.get(cob, '#8c564b')
-            df_s['Wavelength'] = df_s['Banda'].astype(str).str.extract(r'(\d+)').astype(float)
-            if not df_s['Wavelength'].isnull().all():
-                df_s = df_s.sort_values('Wavelength')
-                ax.plot(df_s['Wavelength'], df_s['Reflectancia'], color=c, label=cob, linewidth=2)
+    sensores = df['Sensor'].unique() if 'Sensor' in df.columns else ['Escena Global']
+    
+    if 'Escena' in df.columns: # Para comparación global
+        escenas = df['Escena'].unique()
+        for escena in escenas:
+            df_e = df[df['Escena'] == escena].copy()
+            df_e['Wavelength'] = df_e['Banda'].astype(str).str.extract(r'(\d+)').astype(float)
+            if not df_e['Wavelength'].isnull().all():
+                df_e = df_e.sort_values('Wavelength')
+                ax.plot(df_e['Wavelength'], df_e['Reflectancia'], label=escena, linewidth=2)
             else:
-                if 'idx_real' in df_s.columns: df_s = df_s.sort_values('idx_real')
-                ax.plot(df_s['Banda'], df_s['Reflectancia'], color=c, label=cob, linewidth=2)
+                ax.plot(df_e['Banda'], df_e['Reflectancia'], label=escena, marker='o', linewidth=2)
+    else: # Por escena individual
+        for sensor in sensores:
+            df_s = df[df['Sensor'] == sensor].copy()
+            if tipo_datos == "Multiespectral (dron/satélite)":
+                c = {'Uas (10m)': '#1f77b4', 'Uas (nativo)': '#2ca02c', sat_name: '#8c564b'}.get(sensor, 'black')
+                ax.plot(df_s['Banda'], df_s['Reflectancia'], marker='o', color=c, label=sensor, linewidth=2)
+            else:
+                c = color_map.get(cob, '#8c564b')
+                df_s['Wavelength'] = df_s['Banda'].astype(str).str.extract(r'(\d+)').astype(float)
+                if not df_s['Wavelength'].isnull().all():
+                    df_s = df_s.sort_values('Wavelength')
+                    ax.plot(df_s['Wavelength'], df_s['Reflectancia'], color=c, label=cob, linewidth=2)
+                else:
+                    if 'idx_real' in df_s.columns: df_s = df_s.sort_values('idx_real')
+                    ax.plot(df_s['Banda'], df_s['Reflectancia'], color=c, label=cob, linewidth=2)
 
     ax.set_ylim([y_min, y_max])
     if tipo_datos != "Multiespectral (dron/satélite)": add_spectral_bands_plt(ax)
-    ax.set_title(f"Firma espectral: {cob}", fontsize=14, weight='bold', pad=15)
+    
+    titulo = f"Evolución: {cob} {titulo_extra}" if 'Escena' in df.columns else f"Firma espectral: {cob} {titulo_extra}"
+    ax.set_title(titulo, fontsize=14, weight='bold', pad=15)
     ax.set_xlabel("Longitud de onda (nm)" if tipo_datos != "Multiespectral (dron/satélite)" else "Banda espectral", fontsize=12)
     ax.set_ylabel("Reflectancia", fontsize=12)
     ax.grid(color='gray', linestyle=':', linewidth=0.5, alpha=0.7)
-    ax.legend(frameon=True, facecolor='white', edgecolor='black')
+    ax.legend(frameon=True, facecolor='white', edgecolor='black', bbox_to_anchor=(1.05, 1) if 'Escena' in df.columns else None, loc='upper left' if 'Escena' in df.columns else 'best')
     for spine in ax.spines.values(): spine.set_color('black'); spine.set_linewidth(1.2)
     plt.tight_layout()
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight'); plt.close(fig); return buf.getvalue()
@@ -267,7 +281,7 @@ def export_formal_boxplot(df, idx_name, sat_name):
 
 def export_formal_scatter(df, title, r2_val, es_indice=False):
     fig, ax = plt.subplots(figsize=(6, 5), dpi=300)
-    color_col = 'Cobertura' if es_indice else ('Banda' if 'Banda' in df.columns and len(df['Banda'].unique()) > 1 else ('Escena' if 'Escena' in df.columns else None))
+    color_col = 'Escena' if 'Escena' in df.columns else ('Cobertura' if es_indice else ('Banda' if 'Banda' in df.columns and len(df['Banda'].unique()) > 1 else None))
     
     if color_col:
         cmap = plt.get_cmap('tab10')
@@ -710,9 +724,70 @@ def pre_generar_graficos(df_firmas, sat_name, tipo_datos, color_map, escena_name
         fig_f.update_yaxes(range=y_range, showgrid=True, gridcolor='LightGray', title="Reflectancia") 
         fig_f.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
         pre_firmas[cob] = fig_f
-        pre_firmas_plt[cob] = export_formal_signature(df_f, f"{cob}_{escena_name}", sat_name, tipo_datos, color_map, y_range[0], y_range[1])
+        pre_firmas_plt[cob] = export_formal_signature(df_f, cob, sat_name, tipo_datos, color_map, y_range[0], y_range[1], f"({escena_name})")
         
     return pre_firmas, pre_firmas_plt, fig_gen_uas, buf_gen_uas, fig_gen_sat, buf_gen_sat, fig_gen_hs, buf_gen_hs
+
+def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos_sesion, color_map):
+    # Función para generar y guardar los gráficos de la pestaña global
+    res = {}
+    cobs = all_f['Cobertura'].unique()
+    names = all_f['Escena'].unique()
+
+    y_min_g = all_f['Reflectancia'].min()
+    y_max_g = all_f['Reflectancia'].max()
+    y_padding_g = (y_max_g - y_min_g) * 0.05
+    y_range_g = [max(0, y_min_g - y_padding_g), y_max_g + y_padding_g]
+
+    # Gráficos Evolución UAS/Satélite
+    if tipo_datos_sesion == "Multiespectral (dron/satélite)":
+        for c in cobs:
+            df_c_uas = all_f[(all_f['Cobertura'] == c) & (all_f['Sensor'] == 'Uas (nativo)')]
+            if not df_c_uas.empty:
+                res[f'buf_glob_uas_{c}'] = export_formal_signature(df_c_uas, c, sat_name_sesion, tipo_datos_sesion, color_map, y_range_g[0], y_range_g[1], "(Evolución UAS)")
+            
+            df_c_sat = all_f[(all_f['Cobertura'] == c) & (all_f['Sensor'] == sat_name_sesion)]
+            if not df_c_sat.empty:
+                res[f'buf_glob_sat_{c}'] = export_formal_signature(df_c_sat, c, sat_name_sesion, tipo_datos_sesion, color_map, y_range_g[0], y_range_g[1], f"(Evolución {sat_name_sesion})")
+    else:
+        for c in cobs:
+            df_c_hs = all_f[(all_f['Cobertura'] == c) & (all_f['Sensor'] == sat_name_sesion)]
+            if not df_c_hs.empty:
+                res[f'buf_glob_hs_{c}'] = export_formal_signature(df_c_hs, c, sat_name_sesion, tipo_datos_sesion, color_map, y_range_g[0], y_range_g[1], f"(Evolución {sat_name_sesion})")
+
+    # Gráficos Regresión Global
+    if all_c_filt is not None and not all_c_filt.empty:
+        r2_list = []
+        for n in names:
+            df_esc = all_c_filt[all_c_filt['Escena'] == n]
+            for c in cobs:
+                df_sub = df_esc[df_esc['Cobertura'] == c]
+                if len(df_sub) > 2:
+                    mod, r2_val = calcular_regresion_limpia(df_sub)
+                    r2_list.append({'Escena': n, 'Cobertura': c, 'R2': r2_val})
+        
+        if r2_list:
+            df_r2_glob = pd.DataFrame(r2_list)
+            # Para el bar chart global
+            fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
+            df_pivot = df_r2_glob.pivot(index='Cobertura', columns='Escena', values='R2')
+            df_pivot.plot(kind='bar', ax=ax, cmap='PuBuGn')
+            mean_r2 = df_r2_glob['R2'].mean()
+            ax.axhline(y=mean_r2, color='red', linestyle='--', label=f'Promedio global ({mean_r2:.3f})')
+            ax.set_title("Comparación R² por cobertura y escena", weight='bold')
+            ax.set_ylabel("R²")
+            ax.legend(frameon=True, facecolor='white', edgecolor='black')
+            plt.tight_layout()
+            buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight'); plt.close(fig)
+            res['buf_glob_bar_r2'] = buf.getvalue()
+
+            for c in cobs:
+                df_sub = all_c_filt[all_c_filt['Cobertura'] == c]
+                if len(df_sub) > 2:
+                    mod_g, r2_g = calcular_regresion_limpia(df_sub)
+                    res[f'buf_glob_scat_{c}'] = export_formal_scatter(df_sub, f"Regresión radiométrica global: {c}", r2_g)
+    
+    return res
 
 # -----------------------------
 # 3. Interfaz (sidebar)
@@ -867,7 +942,7 @@ if st.session_state.get("analisis_listo"):
             d = st.session_state.data_escenas[name]
             st.header(f"Escena: {name}")
             
-            # BLOQUE DE CARGA CACHEADA
+            # BLOQUE DE CARGA CACHEADA PERSISTENTE
             if 'df_firmas' not in d and has_vector and d.get('gdf') is not None:
                 loading_ph = st.empty()
                 with loading_ph.container():
@@ -886,6 +961,29 @@ if st.session_state.get("analisis_listo"):
                     if st.session_state.usar_cartografia and tipo_datos_sesion == "Multiespectral (dron/satélite)":
                         status_text.info("Procesamiento: renderización espacial...")
                         d['pre_m'] = generar_todos_pre_mapas(d, sat_scale, sat_offset, uas_scale, uas_offset, st.session_state.bandas_config, name)
+                    
+                    # Generación de cache de índices para descargas rápidas
+                    d['idx_buffers'] = {}
+                    d['idx_scat_buffers'] = {}
+                    if not df_i.empty:
+                        for idx_sel in df_i['Índice'].unique():
+                            df_ind_filt = df_i[df_i['Índice'] == idx_sel]
+                            d['idx_buffers'][idx_sel] = export_formal_boxplot(df_ind_filt, idx_sel, sat_name_sesion)
+                            if df_corr_idx is not None and not df_corr_idx.empty:
+                                df_c_idx_filt = df_corr_idx[df_corr_idx['Índice'] == idx_sel]
+                                if not df_c_idx_filt.empty and len(df_c_idx_filt) > 2:
+                                    _, r2_idx = calcular_regresion_limpia(df_c_idx_filt)
+                                    d['idx_scat_buffers'][idx_sel] = export_formal_scatter(df_c_idx_filt, f"Relación {idx_sel}: {name}", r2_idx, es_indice=True)
+                    
+                    # Generación de cache de regresiones para descargas rápidas
+                    d['reg_buffers'] = {}
+                    if not df_c.empty:
+                        for c in df_c['Cobertura'].unique():
+                            df_sub = df_c[df_c['Cobertura'] == c]
+                            if len(df_sub) > 2:
+                                _, r2_g = calcular_regresion_limpia(df_sub)
+                                d['reg_buffers'][c] = export_formal_scatter(df_sub, f"Regresión radiométrica: {c} ({name})", r2_g)
+                                
                     pbar.progress(100)
                 st.session_state.data_escenas[name] = d; loading_ph.empty()
             elif 'pre_m' not in d and st.session_state.usar_cartografia and tipo_datos_sesion == "Multiespectral (dron/satélite)":
@@ -1023,10 +1121,9 @@ if st.session_state.get("analisis_listo"):
                             c_box_plot, c_box_dl = st.columns([4, 1])
                             with c_box_plot: st.plotly_chart(fig_box, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"box_{name}_{idx_sel}")
                             with c_box_dl: 
-                                st.write(" ") 
-                                st.write(" ")
-                                buf_box = export_formal_boxplot(df_ind_filt, idx_sel, sat_name_sesion)
-                                st.download_button("Descargar imagen", buf_box, f"Boxplot_{idx_sel}_{name}.png", "image/png", use_container_width=True, key=f"dl_box_{name}_{idx_sel}")
+                                st.write(" "); st.write(" ")
+                                if idx_sel in d['idx_buffers']:
+                                    st.download_button("Descargar imagen", d['idx_buffers'][idx_sel], f"Boxplot_{idx_sel}_{name}.png", "image/png", use_container_width=True, key=f"dl_box_{name}_{idx_sel}")
 
                             st.markdown(f"**Promedio calculado de {idx_sel} por cobertura**")
                             df_mean = df_ind_filt.groupby(['Cobertura', 'Sensor'])['Valor'].mean().reset_index()
@@ -1038,7 +1135,7 @@ if st.session_state.get("analisis_listo"):
                             df_corr_idx = d.get('df_corr_idx')
                             if df_corr_idx is not None and not df_corr_idx.empty:
                                 df_c_idx_filt = df_corr_idx[df_corr_idx['Índice'] == idx_sel]
-                                if not df_c_idx_filt.empty:
+                                if not df_c_idx_filt.empty and len(df_c_idx_filt) > 2:
                                     mod_idx, r2_idx = calcular_regresion_limpia(df_c_idx_filt)
                                     fig_idx = px.scatter(df_c_idx_filt, x="Uas", y="Sat", color="Cobertura", title=f"Dispersión {idx_sel} (r²={r2_idx:.3f})", color_discrete_map=st.session_state.color_map)
                                     x_range_idx = pd.DataFrame({'Uas': [df_c_idx_filt['Uas'].min(), df_c_idx_filt['Uas'].max()]})
@@ -1050,8 +1147,8 @@ if st.session_state.get("analisis_listo"):
                                     with c_scat_plot: st.plotly_chart(fig_idx, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"scat_idx_{name}_{idx_sel}")
                                     with c_scat_dl:
                                         st.write(" "); st.write(" ")
-                                        buf_idx_scat = export_formal_scatter(df_c_idx_filt, f"Relación {idx_sel}: {name}", r2_idx, es_indice=True)
-                                        st.download_button("Descargar imagen", buf_idx_scat, f"Dispersion_{idx_sel}_{name}.png", "image/png", use_container_width=True, key=f"dl_scat_idx_{name}_{idx_sel}")
+                                        if idx_sel in d['idx_scat_buffers']:
+                                            st.download_button("Descargar imagen", d['idx_scat_buffers'][idx_sel], f"Dispersion_{idx_sel}_{name}.png", "image/png", use_container_width=True, key=f"dl_scat_idx_{name}_{idx_sel}")
                                 else: st.info("No hay suficientes datos superpuestos para generar la regresión de este índice.")
                         else: st.info("No se han registrado índices para el cálculo.")
                     tab_idx += 1
@@ -1067,7 +1164,7 @@ if st.session_state.get("analisis_listo"):
                                 for c in cobs:
                                     df_sub = df_corr_filt[df_corr_filt['Cobertura'] == c]
                                     if len(df_sub) > 2: 
-                                        mod, r2_val = calcular_regresion_limpia(df_sub)
+                                        _, r2_val = calcular_regresion_limpia(df_sub)
                                         r2_list_escena.append({'Cobertura': c, 'R2': r2_val})
                                 if r2_list_escena:
                                     df_r2 = pd.DataFrame(r2_list_escena)
@@ -1090,15 +1187,29 @@ if st.session_state.get("analisis_listo"):
                                         fig_c.update_xaxes(showgrid=True, gridcolor='LightGray'); fig_c.update_yaxes(showgrid=True, gridcolor='LightGray')
                                         with cols[i%3]: 
                                             st.plotly_chart(fig_c, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"scat_{name}_{c}")
-                                            buf_scat = export_formal_scatter(df_sub, f"Regresión radiométrica: {c} ({name})", r2_g)
-                                            st.download_button("Descargar imagen", buf_scat, f"Regresion_Bandas_{c}_{name}.png", "image/png", use_container_width=True, key=f"dl_reg_b_{name}_{c}")
+                                            if c in d.get('reg_buffers', {}):
+                                                st.download_button("Descargar imagen", d['reg_buffers'][c], f"Regresion_Bandas_{c}_{name}.png", "image/png", use_container_width=True, key=f"dl_reg_b_{name}_{c}")
                             else: st.warning("Seleccione al menos una banda espectral para procesar la estadística comparativa.")
 
     # --- Pestaña comparación global ---
     if has_vector and len(names) > 0:
         with tabs[-1]:
             st.header("Análisis comparativo global multiescena")
-            all_f = pd.concat([st.session_state.data_escenas[n]['df_firmas'].assign(Escena=n) for n in names if 'df_firmas' in st.session_state.data_escenas[n]])
+            
+            # Solo procesamos la data global si no existe en la sesión
+            if 'df_global_all_f' not in st.session_state:
+                with st.spinner("Compilando análisis global..."):
+                    all_f = pd.concat([st.session_state.data_escenas[n]['df_firmas'].assign(Escena=n) for n in names if 'df_firmas' in st.session_state.data_escenas[n]])
+                    all_c_list = [st.session_state.data_escenas[n]['df_corr'].assign(Escena=n) for n in names if st.session_state.data_escenas[n]['has_sat'] and st.session_state.data_escenas[n]['has_uas'] and 'df_corr' in st.session_state.data_escenas[n] and not st.session_state.data_escenas[n]['df_corr'].empty]
+                    all_c = pd.concat(all_c_list) if all_c_list else None
+                    
+                    st.session_state['df_global_all_f'] = all_f
+                    st.session_state['df_global_all_c'] = all_c
+                    st.session_state['global_buffers'] = pre_generar_graficos_globales(all_f, all_c, sat_name_sesion, tipo_datos_sesion, st.session_state.color_map)
+            
+            all_f = st.session_state['df_global_all_f']
+            all_c = st.session_state['df_global_all_c']
+            glob_buf = st.session_state['global_buffers']
             cobs = all_f['Cobertura'].unique()
 
             # Global Y-Range
@@ -1108,7 +1219,7 @@ if st.session_state.get("analisis_listo"):
             y_range_g = [max(0, y_min_g - y_padding_g), y_max_g + y_padding_g]
 
             if tipo_datos_sesion == "Multiespectral (dron/satélite)":
-                gt1, gt2, gt3 = st.tabs(["Evolución uas", "Evolución satélite", "Resumen de ajuste global (r²)"])
+                gt1, gt2, gt3 = st.tabs(["Evolución UAS", "Evolución satélite", "Resumen de ajuste global (r²)"])
                 with gt1:
                     cols = st.columns(3)
                     for i, c in enumerate(cobs):
@@ -1119,7 +1230,10 @@ if st.session_state.get("analisis_listo"):
                             fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
                             fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
                             fig.update_yaxes(range=y_range_g, showgrid=True, gridcolor='LightGray')
-                            with cols[i % 3]: st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_uas_{c}")
+                            with cols[i % 3]: 
+                                st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_uas_{c}")
+                                if f'buf_glob_uas_{c}' in glob_buf:
+                                    st.download_button("Descargar imagen", glob_buf[f'buf_glob_uas_{c}'], f"Evolucion_UAS_{c}.png", "image/png", use_container_width=True, key=f"dl_g_uas_{c}")
                 with gt2:
                     cols = st.columns(3)
                     for i, c in enumerate(cobs):
@@ -1130,11 +1244,12 @@ if st.session_state.get("analisis_listo"):
                             fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
                             fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
                             fig.update_yaxes(range=y_range_g, showgrid=True, gridcolor='LightGray')
-                            with cols[i % 3]: st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_sat_{c}")
+                            with cols[i % 3]: 
+                                st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_sat_{c}")
+                                if f'buf_glob_sat_{c}' in glob_buf:
+                                    st.download_button("Descargar imagen", glob_buf[f'buf_glob_sat_{c}'], f"Evolucion_SAT_{c}.png", "image/png", use_container_width=True, key=f"dl_g_sat_{c}")
                 with gt3:
-                    all_c_list = [st.session_state.data_escenas[n]['df_corr'].assign(Escena=n) for n in names if st.session_state.data_escenas[n]['has_sat'] and st.session_state.data_escenas[n]['has_uas'] and 'df_corr' in st.session_state.data_escenas[n] and not st.session_state.data_escenas[n]['df_corr'].empty]
-                    if all_c_list:
-                        all_c = pd.concat(all_c_list)
+                    if all_c is not None:
                         bandas_disp_glob = all_c['Banda'].unique()
                         bandas_sel_glob = st.multiselect("Filtrar bandas para el cálculo global (r²):", options=bandas_disp_glob, default=bandas_disp_glob, key="ms_r2_glob")
                         all_c_filt = all_c[all_c['Banda'].isin(bandas_sel_glob)]
@@ -1145,7 +1260,7 @@ if st.session_state.get("analisis_listo"):
                                 for c in cobs:
                                     df_sub = df_esc[df_esc['Cobertura'] == c]
                                     if len(df_sub) > 2:
-                                        mod, r2_val = calcular_regresion_limpia(df_sub)
+                                        _, r2_val = calcular_regresion_limpia(df_sub)
                                         r2_list.append({'Escena': n, 'Cobertura': c, 'R2': r2_val})
                             if r2_list:
                                 df_r2_glob = pd.DataFrame(r2_list)
@@ -1153,8 +1268,14 @@ if st.session_state.get("analisis_listo"):
                                 promedio_total = df_r2_glob['R2'].mean()
                                 fig_r2_glob.add_hline(y=promedio_total, line_dash="dash", line_color="#d62728", annotation_text=f"Promedio global: {promedio_total:.3f}", annotation_position="top right")
                                 fig_r2_glob.update_layout(template="simple_white")
-                                st.plotly_chart(fig_r2_glob, use_container_width=True, config={'toImageButtonOptions': {'format': 'png', 'filename': 'R2_Global'}}, key="glob_bar_r2")
                                 
+                                c_g_r2, c_g_r2_dl = st.columns([4,1])
+                                with c_g_r2: st.plotly_chart(fig_r2_glob, use_container_width=True, config={'toImageButtonOptions': {'format': 'png', 'filename': 'R2_Global'}}, key="glob_bar_r2")
+                                with c_g_r2_dl:
+                                    st.write(" "); st.write(" ")
+                                    if 'buf_glob_bar_r2' in glob_buf:
+                                        st.download_button("Descargar imagen", glob_buf['buf_glob_bar_r2'], "R2_Global_Barplot.png", "image/png", use_container_width=True, key="dl_g_bar_r2")
+
                                 st.markdown("### Regresiones consolidadas globales por cobertura")
                                 cols = st.columns(3)
                                 for i, c in enumerate(cobs):
@@ -1166,7 +1287,10 @@ if st.session_state.get("analisis_listo"):
                                         fig.add_trace(go.Scatter(x=x_range['Uas'], y=mod_g.predict(x_range), mode='lines', name='Tendencia global', line=dict(color='black', width=2, dash='dot')))
                                         fig.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
                                         fig.update_xaxes(showgrid=True, gridcolor='LightGray'); fig.update_yaxes(showgrid=True, gridcolor='LightGray')
-                                        with cols[i % 3]: st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_scat_{c}")
+                                        with cols[i % 3]: 
+                                            st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_scat_{c}")
+                                            if f'buf_glob_scat_{c}' in glob_buf:
+                                                st.download_button("Descargar imagen", glob_buf[f'buf_glob_scat_{c}'], f"Regresion_Global_{c}.png", "image/png", use_container_width=True, key=f"dl_g_scat_{c}")
                         else: st.warning("Seleccione al menos una banda espectral para procesar la estadística comparativa.")
             else:
                  gt1 = st.tabs(["Evolución de firmas hiperespectrales"])[0]
@@ -1183,15 +1307,18 @@ if st.session_state.get("analisis_listo"):
                              fig.update_xaxes(showgrid=True, gridcolor='LightGray', title="Longitud de onda (nm)" if x_col == "Wavelength" else "Banda")
                              fig.update_yaxes(range=y_range_g, showgrid=True, gridcolor='LightGray')
                              add_spectral_bands_plotly(fig)
-                             with cols[i % 3]: st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_hs_{c}")
+                             with cols[i % 3]: 
+                                 st.plotly_chart(fig, use_container_width=True, config={'toImageButtonOptions': {'format': 'png'}}, key=f"glob_hs_{c}")
+                                 if f'buf_glob_hs_{c}' in glob_buf:
+                                     st.download_button("Descargar imagen", glob_buf[f'buf_glob_hs_{c}'], f"Evolucion_HS_{c}.png", "image/png", use_container_width=True, key=f"dl_g_hs_{c}")
 
             with st.expander("Centro de descargas (consolidado global)", expanded=False):
-                st.download_button("Descargar firmas globales (csv)", all_f.to_csv(index=False).encode('utf-8'), "firmas_globales.csv", "text/csv", key=f"dl_csv_glob_firmas_{name}")
-                if tipo_datos_sesion == "Multiespectral (dron/satélite)" and 'all_c' in locals():
-                    st.download_button("Descargar correlaciones globales (csv)", all_c.to_csv(index=False).encode('utf-8'), "correlaciones_globales.csv", "text/csv", key=f"dl_csv_glob_corr_{name}")
+                st.download_button("Descargar firmas globales (csv)", all_f.to_csv(index=False).encode('utf-8'), "firmas_globales.csv", "text/csv", key="dl_csv_glob_firmas_all")
+                if tipo_datos_sesion == "Multiespectral (dron/satélite)" and all_c is not None:
+                    st.download_button("Descargar correlaciones globales (csv)", all_c.to_csv(index=False).encode('utf-8'), "correlaciones_globales.csv", "text/csv", key="dl_csv_glob_corr_all")
 else:
     # --- Pantalla de inicio ---
-    st.markdown("### Plataforma de validación espectral y multitemporal")
+    st.markdown("### Plataforma de Validación Espectral y Multitemporal")
     st.markdown("Esta herramienta computacional ha sido desarrollada como solución metodológica para la validación y calibración cruzada de datos espaciales. Ante la incertidumbre en la fiabilidad de las imágenes capturadas por sensores montados en VANTs (drones comerciales como MicaSense o Sentera), esta plataforma utiliza la rigurosidad radiométrica de plataformas satelitales (como Sentinel-2) como 'verdad espacial' para confirmar la integridad de los datos.")
     st.markdown("---")
     col1, col2 = st.columns(2)
@@ -1201,11 +1328,11 @@ else:
         st.success("**2. Hiperespectral puro**\n\nDesbloquea el análisis de datos masivos. Omite la creación de índices básicos y se enfoca en entregar el espectro electromagnético continuo mediante un explorador de barrido espacial.")
     st.markdown("---")
     
-    st.markdown("#### Guía metodológica de uso")
+    st.markdown("#### Guía Metodológica de Uso")
     st.markdown("""
-    * **1. Preparación vectorial:** Para operar la estadística automatizada, cargue un archivo vectorial (`.zip` con shapefile o `.gpkg`) que contenga un atributo de texto identificando las coberturas (ej. agua, vegetación, suelo).
-    * **2. Ajuste vadiométrico:** Al trabajar con Sentinel-2 extraído de Google Earth Engine, recuerde que el offset suele ser 0 y la escala 10000. Configure correctamente la escala y offset de la ortofoto de su dron para que ambos sensores grafiquen entre 0 y 1.
-    * **3. Configuración de vandas:** Asigne el número de banda correcto según su sensor (MicaSense, Sentera, etc.). Si su sensor no posee una banda específica (ej. SWIR), ingrese **0**.
-    * **4. Interpretación de resultados:** La plataforma generará automáticamente firmas espectrales comparativas y gráficos de dispersión. Un $R^2$ cercano a 1.0 valida la fiabilidad radiométrica de la captura del dron respecto al satélite.
-    * **5. Descarga de informes:** Todos los gráficos poseen un botón estandarizado para descargar la imagen en alta resolución (PNG), lista para anexar a sus reportes y documentos.
+    * **1. Preparación Vectorial:** Para operar la estadística automatizada, cargue un archivo vectorial (`.zip` con shapefile o `.gpkg`) que contenga un atributo de texto identificando las coberturas (ej. agua, vegetación, suelo).
+    * **2. Ajuste Radiométrico:** Al trabajar con Sentinel-2 extraído de Google Earth Engine, recuerde que el offset suele ser 0 y la escala 10000. Configure correctamente la escala y offset de la ortofoto de su dron para que ambos sensores grafiquen entre 0 y 1.
+    * **3. Configuración de Bandas:** Asigne el número de banda correcto según su sensor (MicaSense, Sentera, etc.). Si su sensor no posee una banda específica (ej. SWIR), ingrese **0**.
+    * **4. Interpretación de Resultados:** La plataforma generará automáticamente firmas espectrales comparativas y gráficos de dispersión. Un $R^2$ cercano a 1.0 valida la fiabilidad radiométrica de la captura del dron respecto al satélite.
+    * **5. Descarga de Informes:** Todos los gráficos poseen un botón estandarizado para descargar la imagen en alta resolución (PNG), lista para anexar a sus reportes y documentos.
     """)
