@@ -828,7 +828,7 @@ with st.sidebar:
             st.session_state.raw_gdf = preview_gdf
             st.session_state.has_vector = True
             resumen_columnas = [{"Columna": c, "Ejemplos": ", ".join(map(str, preview_gdf[c].dropna().unique()[:3]))} for c in preview_gdf.columns if c != 'geometry']
-            st.dataframe(pd.DataFrame(resumen_columnas), hide_index=True, width="stretch")
+            st.dataframe(pd.DataFrame(resumen_columnas), hide_index=True)
             st.session_state.col_clase = st.selectbox("Columna clase:", [c for c in preview_gdf.columns if c != 'geometry'], key='selector_clase')
         else:
             st.session_state.has_vector = False
@@ -863,7 +863,7 @@ with st.sidebar:
          presets_satelites["Prisma (L2D)"] = {"escala": 65535.0, "offset": 0.0}
     
     st.markdown("*Satélite*")
-    sat_preset = st.selectbox("Seleccionar sensor satelital:", list(presets_satelites.keys()), index=list(presets_satelites.keys()).index("Prisma (L2D)") if "Hiperespectral" in tipo_datos else 0)
+    sat_preset = st.selectbox("Seleccionar sensor satelital:", list(presets_satelites.keys()), index=list(presets_satelites.keys()).index("Prisma (L2D)") if "Hiperespectral" in tipo_datos else 2)
     st.caption("Nota: GEE usa Escala 10000. Si tu imagen es Sentinel-2 desde Copérnico (2022 en adelante), usa el preset post-2022 (offset -1000).")
     
     sat_name = st.text_input("Nombre en gráficos:", sat_preset.split(" (")[0] if sat_preset not in ["Personalizado", "Google Earth Engine (Reflectancia 0-1)", "Google Earth Engine (Escala 10000)"] else "Satélite GEE")
@@ -1135,47 +1135,50 @@ if st.session_state.get("analisis_listo"):
                         st.subheader("Distribución estadística de índices espectrales por cobertura")
                         df_ind = d.get('df_indices')
                         if df_ind is not None and not df_ind.empty:
-                            indices_disp = df_ind['Índice'].unique()
-                            idx_sel = st.selectbox("Seleccione el índice a analizar:", indices_disp, key=f"sel_idx_{name}")
-                            df_ind_filt = df_ind[df_ind['Índice'] == idx_sel]
+                            indices_disp = list(df_ind['Índice'].unique())
+                            idx_tabs = st.tabs(indices_disp)
                             
-                            fig_box = px.box(df_ind_filt, x="Cobertura", y="Valor", color="Sensor", title=f"Índice {idx_sel}", color_discrete_map={'Uas (10m)': '#1f77b4', 'Uas (nativo)': '#2ca02c', sat_name_sesion: '#8c564b'})
-                            fig_box.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None))
-                            fig_box.update_xaxes(showgrid=True, gridcolor='LightGray')
-                            fig_box.update_yaxes(showgrid=True, gridcolor='LightGray')
-
-                            c_box_plot, c_box_dl = st.columns([4, 1])
-                            with c_box_plot: st.plotly_chart(fig_box, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"box_{name}_{idx_sel}")
-                            with c_box_dl: 
-                                st.write(" "); st.write(" ")
-                                if idx_sel in d['idx_buffers']:
-                                    custom_download_button(d['idx_buffers'][idx_sel], f"Boxplot_{idx_sel}_{name}.png")
-
-                            st.markdown(f"**Promedio calculado de {idx_sel} por cobertura**")
-                            df_mean = df_ind_filt.groupby(['Cobertura', 'Sensor'])['Valor'].mean().reset_index()
-                            df_pivot = df_mean.pivot(index='Cobertura', columns='Sensor', values='Valor').round(3)
-                            st.dataframe(df_pivot, width="stretch")
-                            
-                            st.markdown("---")
-                            st.subheader(f"Relación Dron vs Satélite: {idx_sel}")
-                            df_corr_idx = d.get('df_corr_idx')
-                            if df_corr_idx is not None and not df_corr_idx.empty:
-                                df_c_idx_filt = df_corr_idx[df_corr_idx['Índice'] == idx_sel]
-                                if not df_c_idx_filt.empty and len(df_c_idx_filt) > 2:
-                                    mod_idx, r2_idx = calcular_regresion_limpia(df_c_idx_filt)
-                                    fig_idx = px.scatter(df_c_idx_filt, x="Uas", y="Sat", color="Cobertura", title=f"Dispersión {idx_sel} (r²={r2_idx:.3f})", color_discrete_map=st.session_state.color_map)
-                                    x_range_idx = pd.DataFrame({'Uas': [df_c_idx_filt['Uas'].min(), df_c_idx_filt['Uas'].max()]})
-                                    fig_idx.add_trace(go.Scatter(x=x_range_idx['Uas'], y=mod_idx.predict(x_range_idx), mode='lines', name='Tendencia', line=dict(color='black', width=2, dash='dot')))
-                                    fig_idx.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
-                                    fig_idx.update_xaxes(showgrid=True, gridcolor='LightGray'); fig_idx.update_yaxes(showgrid=True, gridcolor='LightGray')
+                            for k, idx_sel in enumerate(indices_disp):
+                                with idx_tabs[k]:
+                                    df_ind_filt = df_ind[df_ind['Índice'] == idx_sel]
                                     
-                                    c_scat_plot, c_scat_dl = st.columns([4, 1])
-                                    with c_scat_plot: st.plotly_chart(fig_idx, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"scat_idx_{name}_{idx_sel}")
-                                    with c_scat_dl:
+                                    fig_box = px.box(df_ind_filt, x="Cobertura", y="Valor", color="Sensor", title=f"Índice {idx_sel}", color_discrete_map={'Uas (10m)': '#1f77b4', 'Uas (nativo)': '#2ca02c', sat_name_sesion: '#8c564b'})
+                                    fig_box.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None))
+                                    fig_box.update_xaxes(showgrid=True, gridcolor='LightGray')
+                                    fig_box.update_yaxes(showgrid=True, gridcolor='LightGray')
+
+                                    c_box_plot, c_box_dl = st.columns([4, 1])
+                                    with c_box_plot: st.plotly_chart(fig_box, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"box_{name}_{idx_sel}")
+                                    with c_box_dl: 
                                         st.write(" "); st.write(" ")
-                                        if idx_sel in d['idx_scat_buffers']:
-                                            custom_download_button(d['idx_scat_buffers'][idx_sel], f"Dispersion_{idx_sel}_{name}.png")
-                                else: st.info("No hay suficientes datos superpuestos para generar la regresión de este índice.")
+                                        if idx_sel in d['idx_buffers']:
+                                            custom_download_button(d['idx_buffers'][idx_sel], f"Boxplot_{idx_sel}_{name}.png")
+
+                                    st.markdown(f"**Promedio calculado de {idx_sel} por cobertura**")
+                                    df_mean = df_ind_filt.groupby(['Cobertura', 'Sensor'])['Valor'].mean().reset_index()
+                                    df_pivot = df_mean.pivot(index='Cobertura', columns='Sensor', values='Valor').round(3)
+                                    st.dataframe(df_pivot, width="stretch")
+                                    
+                                    st.markdown("---")
+                                    st.subheader(f"Relación Dron vs Satélite: {idx_sel}")
+                                    df_corr_idx = d.get('df_corr_idx')
+                                    if df_corr_idx is not None and not df_corr_idx.empty:
+                                        df_c_idx_filt = df_corr_idx[df_corr_idx['Índice'] == idx_sel]
+                                        if not df_c_idx_filt.empty and len(df_c_idx_filt) > 2:
+                                            mod_idx, r2_idx = calcular_regresion_limpia(df_c_idx_filt)
+                                            fig_idx = px.scatter(df_c_idx_filt, x="Uas", y="Sat", color="Cobertura", title=f"Dispersión {idx_sel} (r²={r2_idx:.3f})", color_discrete_map=st.session_state.color_map)
+                                            x_range_idx = pd.DataFrame({'Uas': [df_c_idx_filt['Uas'].min(), df_c_idx_filt['Uas'].max()]})
+                                            fig_idx.add_trace(go.Scatter(x=x_range_idx['Uas'], y=mod_idx.predict(x_range_idx), mode='lines', name='Tendencia', line=dict(color='black', width=2, dash='dot')))
+                                            fig_idx.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                                            fig_idx.update_xaxes(showgrid=True, gridcolor='LightGray'); fig_idx.update_yaxes(showgrid=True, gridcolor='LightGray')
+                                            
+                                            c_scat_plot, c_scat_dl = st.columns([4, 1])
+                                            with c_scat_plot: st.plotly_chart(fig_idx, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"scat_idx_{name}_{idx_sel}")
+                                            with c_scat_dl:
+                                                st.write(" "); st.write(" ")
+                                                if idx_sel in d['idx_scat_buffers']:
+                                                    custom_download_button(d['idx_scat_buffers'][idx_sel], f"Dispersion_{idx_sel}_{name}.png")
+                                        else: st.info("No hay suficientes datos superpuestos para generar la regresión de este índice.")
                         else: st.info("No se han registrado índices para el cálculo.")
                     tab_idx += 1
 
@@ -1213,6 +1216,24 @@ if st.session_state.get("analisis_listo"):
                                         buf_b = io.BytesIO(); fig_b.savefig(buf_b, format="png", bbox_inches='tight'); plt.close(fig_b)
                                         custom_download_button(buf_b.getvalue(), f"R2_Barplot_{name}.png")
 
+                                st.markdown("---")
+                                st.markdown("**Regresión lineal global (Todas las coberturas)**")
+                                mod_glob, r2_glob = calcular_regresion_limpia(df_corr_filt)
+                                fig_glob = px.scatter(df_corr_filt, x="Uas", y="Sat", color="Cobertura", title=f"Ajuste global de la escena (r²={r2_glob:.3f})", color_discrete_map=st.session_state.color_map)
+                                x_range_glob = pd.DataFrame({'Uas': [df_corr_filt['Uas'].min(), df_corr_filt['Uas'].max()]})
+                                fig_glob.add_trace(go.Scatter(x=x_range_glob['Uas'], y=mod_glob.predict(x_range_glob), mode='lines', name='Tendencia', line=dict(color='black', width=2, dash='dot')))
+                                fig_glob.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                                fig_glob.update_xaxes(showgrid=True, gridcolor='LightGray'); fig_glob.update_yaxes(showgrid=True, gridcolor='LightGray')
+                                
+                                c_glob_scat, c_glob_dl = st.columns([4,1])
+                                with c_glob_scat: 
+                                    st.plotly_chart(fig_glob, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"scat_global_{name}")
+                                with c_glob_dl:
+                                    st.write(" "); st.write(" ")
+                                    buf_glob_scat = export_formal_scatter(df_corr_filt, f"Regresión radiométrica global ({name})", r2_glob, es_indice=True)
+                                    custom_download_button(buf_glob_scat, f"Regresion_Global_Escena_{name}.png")
+
+                                st.markdown("---")
                                 st.markdown("**Regresiones lineales por cobertura**")
                                 cols = st.columns(3)
                                 for i, c in enumerate(cobs):
