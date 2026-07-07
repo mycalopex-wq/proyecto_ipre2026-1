@@ -31,7 +31,6 @@ st.title("Visualizador de datos espaciales y multitemporales")
 # -----------------------------
 
 def get_safe_lims(*dfs, col='Reflectancia'):
-    """Calcula límites seguros para ejes ignorando NaNs y evadiendo colapsos matemáticos."""
     mins, maxs = [], []
     for df in dfs:
         if not df.empty and col in df.columns:
@@ -46,7 +45,6 @@ def get_safe_lims(*dfs, col='Reflectancia'):
     return [max(0, vmin - pad), vmax + pad]
 
 def get_safe_lims_scatter(df, col_x='Uas', col_y='Sat'):
-    """Calcula la caja cuadrada perfecta para ScatterPlots evadiendo NaNs."""
     if df.empty: return [0.0, 1.0]
     mins = [v for v in [df[col_x].min(), df[col_y].min()] if pd.notna(v)]
     maxs = [v for v in [df[col_x].max(), df[col_y].max()] if pd.notna(v)]
@@ -123,7 +121,7 @@ def reproject_raster(in_path, target_crs_str):
 def resample_raster(in_path, target_res=2.0): 
     with rasterio.open(in_path) as src:
         if src.crs.is_geographic:
-            raise ValueError("Error de sistema de coordenadas: el raster está en coordenadas geográficas (grados). Utilice un sistema proyectado (ej. utm).")
+            raise ValueError("Error de coordenadas: el raster está geográfico.")
         new_width = max(int((src.bounds.right - src.bounds.left) / target_res), 1)
         new_height = max(int((src.bounds.top - src.bounds.bottom) / target_res), 1)
         new_transform = from_bounds(*src.bounds, new_width, new_height)
@@ -210,23 +208,24 @@ def add_spectral_bands_plt(ax):
     ax.set_ylim(ymin, ymax)
 
 def export_formal_signature(df, cob, sat_name, tipo_datos, color_map, y_min, y_max, titulo_extra=""):
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
+    fig, ax = plt.subplots(figsize=(9, 5), dpi=300)
     sensores = df['Sensor'].unique() if 'Sensor' in df.columns else ['Escena Global']
     
     if 'Escena' in df.columns: 
         escenas = df['Escena'].unique()
         for escena in escenas:
             df_e = df[df['Escena'] == escena].copy()
+            c_linea = color_map.get(escena, 'black') if color_map else 'black'
             if tipo_datos == "Multiespectral (dron/satélite)":
-                ax.plot(df_e['Banda'], df_e['Reflectancia'], label=escena, marker='o', linewidth=2)
+                ax.plot(df_e['Banda'], df_e['Reflectancia'], label=escena, marker='o', linewidth=2, color=c_linea)
             else:
                 df_e['Wavelength'] = df_e['Banda'].astype(str).str.extract(r'(\d+)').astype(float)
                 if not df_e['Wavelength'].isnull().all():
                     df_e = df_e.sort_values('Wavelength')
-                    ax.plot(df_e['Wavelength'], df_e['Reflectancia'], label=escena, linewidth=2)
+                    ax.plot(df_e['Wavelength'], df_e['Reflectancia'], label=escena, linewidth=2, color=c_linea)
                 else:
                     if 'idx_real' in df_e.columns: df_e = df_e.sort_values('idx_real')
-                    ax.plot(df_e['Banda'], df_e['Reflectancia'], label=escena, marker='o', linewidth=2)
+                    ax.plot(df_e['Banda'], df_e['Reflectancia'], label=escena, marker='o', linewidth=2, color=c_linea)
     else: 
         for sensor in sensores:
             df_s = df[df['Sensor'] == sensor].copy()
@@ -287,7 +286,7 @@ def export_formal_general(df, sensor_name, tipo_datos, color_map, y_min, y_max):
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight'); plt.close(fig); return buf.getvalue()
 
 def export_formal_boxplot(df, idx_name, sat_name):
-    fig, ax = plt.subplots(figsize=(9, 5), dpi=300)
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
     sensores = sorted(df['Sensor'].unique())
     coberturas = sorted(df['Cobertura'].unique())
     positions, data_list, colors = [], [], []
@@ -308,20 +307,34 @@ def export_formal_boxplot(df, idx_name, sat_name):
         base_pos += 1
 
     if data_list:
-        bplot = ax.boxplot(data_list, positions=positions, patch_artist=True, widths=0.6,
-                           boxprops=dict(facecolor="white", color="black"),
-                           medianprops=dict(color="red", linewidth=1.5),
+        vplot = ax.violinplot(data_list, positions=positions, widths=0.75, showmeans=False, showmedians=False, showextrema=False)
+        for pc, color in zip(vplot['bodies'], colors):
+            pc.set_facecolor(color)
+            pc.set_alpha(0.2) 
+            pc.set_edgecolor('black')
+            pc.set_linewidth(1)
+
+        bplot = ax.boxplot(data_list, positions=positions, patch_artist=True, widths=0.15,
+                           boxprops=dict(facecolor="white", color="black", alpha=0.9),
+                           medianprops=dict(color="red", linewidth=2),
                            whiskerprops=dict(color="black", linewidth=1.5),
                            capprops=dict(color="black", linewidth=1.5),
-                           flierprops=dict(marker='o', color='black', alpha=0.5))
-        for patch, color in zip(bplot['boxes'], colors):
-            patch.set_facecolor(color); patch.set_alpha(0.7)
-        ax.set_xticks(tick_pos); ax.set_xticklabels(coberturas, rotation=45, ha='right')
+                           flierprops=dict(marker='o', color='none', alpha=0.0), 
+                           zorder=3)
+        for patch in bplot['boxes']:
+            patch.set_facecolor('white')
+
+        for i, vals in enumerate(data_list):
+            x_jitter = np.random.normal(positions[i], 0.08, size=len(vals))
+            ax.scatter(x_jitter, vals, color=colors[i], alpha=0.7, s=15, zorder=4, edgecolors='white', linewidth=0.3)
+
+        ax.set_xticks(tick_pos)
+        ax.set_xticklabels(coberturas, rotation=45, ha='right', rotation_mode='anchor')
         from matplotlib.patches import Patch
         legend_elements = [Patch(facecolor=color_map.get(s, 'gray'), edgecolor='black', label=s) for s in sensores]
         ax.legend(handles=legend_elements, frameon=True, facecolor='white', edgecolor='black', bbox_to_anchor=(1.02, 1), loc='upper left')
 
-    ax.set_title(f"Distribución estadística: {idx_name}", fontsize=14, weight='bold', pad=15)
+    ax.set_title(f"Distribución real (Violin + Boxplot + Jitter): {idx_name}", fontsize=14, weight='bold', pad=15)
     ax.set_ylabel("Valor del índice", fontsize=12)
     ax.grid(color='gray', linestyle=':', linewidth=0.5, alpha=0.7, axis='y')
     for spine in ax.spines.values(): spine.set_color('black'); spine.set_linewidth(1.2)
@@ -333,7 +346,7 @@ def export_formal_scatter(df, title, r2_val, color_col=None, color_map=None):
     
     if color_col and color_col in df.columns:
         groups = df[color_col].unique()
-        if color_map and color_col == 'Cobertura':
+        if color_map:
             colors = [color_map.get(g, '#1f77b4') for g in groups]
         else:
             cmap = plt.get_cmap('tab10')
@@ -364,7 +377,7 @@ def export_formal_scatter(df, title, r2_val, color_col=None, color_map=None):
     ax.set_ylabel("Valor Satélite", fontsize=12)
     ax.grid(color='gray', linestyle=':', linewidth=0.5, alpha=0.7)
     
-    ax.legend(frameon=True, facecolor='white', edgecolor='black', bbox_to_anchor=(0.5, -0.15), loc='upper center', ncol=2)
+    ax.legend(frameon=True, facecolor='white', edgecolor='black', bbox_to_anchor=(1.05, 1), loc='upper left')
     
     for spine in ax.spines.values(): spine.set_color('black'); spine.set_linewidth(1.2)
     plt.tight_layout()
@@ -384,8 +397,9 @@ def export_formal_temporal_index(df, idx_name, cob, sat_name):
     ax.set_ylabel(f"Valor Medio {idx_name}", fontsize=12)
     ax.grid(color='gray', linestyle=':', linewidth=0.5, alpha=0.7)
     ax.legend(frameon=True, facecolor='white', edgecolor='black', bbox_to_anchor=(1.02, 1), loc='upper left')
+    
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right', rotation_mode='anchor')
     for spine in ax.spines.values(): spine.set_color('black'); spine.set_linewidth(1.2)
-    plt.xticks(rotation=45, ha='right')
     plt.tight_layout()
     buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches='tight'); plt.close(fig); return buf.getvalue()
 
@@ -438,25 +452,20 @@ def inicializar_base(uas_file, sat_file, master_crs, master_gdf, col_clase, tipo
             dest.write(out_image); dest.descriptions = desc
         return out_p
 
-    # 1. Recortamos a la caja común
     if data['has_sat']: data['sat_clip_path'] = recortar_a_caja(sat_path_temp, caja_comun)
     if data['has_uas']: data['uas_path_raw'] = recortar_a_caja(uas_path_temp, caja_comun)
 
-    # 2. IDENTIFICACIÓN DINÁMICA DE RESOLUCIÓN
-    sat_res_dinamica = 10.0 # Por defecto asume 10m si no hay satélite
+    sat_res_dinamica = 10.0
     if data['has_sat']:
         with rasterio.open(data['sat_clip_path']) as src_sat:
-            # src_sat.transform[0] lee el tamaño exacto del píxel en el eje X
-            sat_res_dinamica = src_sat.transform[0] 
+            sat_res_dinamica = src_sat.transform[0]
 
     if data['has_uas']:
-        # Opcional: Leemos la nativa del dron solo para que quede en el registro
         with rasterio.open(data['uas_path_raw']) as src_uas:
             data['uas_native_res'] = src_uas.transform[0]
 
         if tipo_datos == "Multiespectral (dron/satélite)":
-            data['uas_path_1m'] = resample_raster(data['uas_path_raw'], target_res=2.0) # Este se usa solo para visualización
-            # AQUÍ OCURRE LA MAGIA: Remuestreamos el dron EXACTAMENTE a la escala del satélite (sea 10m, 30m o 3m)
+            data['uas_path_1m'] = resample_raster(data['uas_path_raw'], target_res=2.0)
             data['uas_path_10m'] = resample_raster(data['uas_path_raw'], target_res=sat_res_dinamica) 
         else:
             data['uas_path_1m'] = data['uas_path_raw']
@@ -757,7 +766,7 @@ def generar_todos_pre_mapas(data_dict, sat_scale, sat_offset, uas_scale, uas_off
             pre_mapas[f"{sensor}_{modo}"] = generar_mapa_crudo(data_dict, sensor, modo, bandas_config, sat_scale, sat_offset, uas_scale, uas_offset, escena_name)
     return pre_mapas
 
-def pre_generar_graficos(df_firmas, sat_name, tipo_datos, color_map, escena_name):
+def pre_generar_graficos(df_firmas, sat_name, tipo_datos, color_map, escena_name, scene_color_map=None):
     pre_firmas = {}
     pre_firmas_plt = {}
     buf_gen_uas = None; buf_gen_sat = None; buf_gen_hs = None; buf_gen_sat_nir = None
@@ -783,7 +792,7 @@ def pre_generar_graficos(df_firmas, sat_name, tipo_datos, color_map, escena_name
             fig_gen_uas = px.line(df_uas_nat, x="Banda", y="Reflectancia", color="Cobertura", color_discrete_map=color_map, markers=True, title="Resolución nativa Dron (UAS)")
             fig_gen_uas.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
             fig_gen_uas.update_traces(line=dict(width=2), marker=dict(size=8))
-            fig_gen_uas.update_layout(template="simple_white", height=550, plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None))
+            fig_gen_uas.update_layout(template="simple_white", height=550, plot_bgcolor='white', legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None))
             fig_gen_uas.update_yaxes(range=y_range_shared, showgrid=True, gridcolor='LightGray')
             buf_gen_uas = export_formal_general(df_uas_nat, f'Dron UAS - {escena_name}', tipo_datos, color_map, y_range_shared[0], y_range_shared[1])
 
@@ -791,7 +800,7 @@ def pre_generar_graficos(df_firmas, sat_name, tipo_datos, color_map, escena_name
             fig_gen_sat = px.line(df_sat, x="Banda", y="Reflectancia", color="Cobertura", color_discrete_map=color_map, markers=True, title=f"Satélite: {sat_name} (Completa)")
             fig_gen_sat.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
             fig_gen_sat.update_traces(marker=dict(size=8), line=dict(width=2))
-            fig_gen_sat.update_layout(template="simple_white", height=550, plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None))
+            fig_gen_sat.update_layout(template="simple_white", height=550, plot_bgcolor='white', legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None))
             fig_gen_sat.update_yaxes(range=y_range_full, showgrid=True, gridcolor='LightGray')
             buf_gen_sat = export_formal_general(df_sat, f'{sat_name} - {escena_name} (Completa)', tipo_datos, color_map, y_range_full[0], y_range_full[1])
 
@@ -799,7 +808,7 @@ def pre_generar_graficos(df_firmas, sat_name, tipo_datos, color_map, escena_name
                 fig_gen_sat_nir = px.line(df_sat_nir, x="Banda", y="Reflectancia", color="Cobertura", color_discrete_map=color_map, markers=True, title=f"Satélite: {sat_name} (Solo hasta NIR)")
                 fig_gen_sat_nir.update_xaxes(categoryorder='array', categoryarray=bandas_nir, showgrid=True, gridcolor='LightGray')
                 fig_gen_sat_nir.update_traces(marker=dict(size=8), line=dict(width=2))
-                fig_gen_sat_nir.update_layout(template="simple_white", height=550, plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None))
+                fig_gen_sat_nir.update_layout(template="simple_white", height=550, plot_bgcolor='white', legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None))
                 fig_gen_sat_nir.update_yaxes(range=y_range_shared, showgrid=True, gridcolor='LightGray')
                 buf_gen_sat_nir = export_formal_general(df_sat_nir, f'{sat_name} - {escena_name} (NIR)', tipo_datos, color_map, y_range_shared[0], y_range_shared[1])
 
@@ -813,7 +822,7 @@ def pre_generar_graficos(df_firmas, sat_name, tipo_datos, color_map, escena_name
             fig_gen_hs = px.line(df_sat, x=x_col, y="Reflectancia", color="Cobertura", color_discrete_map=color_map, markers=False, title=f"Resolución hiperespectral {sat_name}")
             fig_gen_hs.update_xaxes(showgrid=True, gridcolor='LightGray', title="Longitud de onda (nm)" if x_col == "Wavelength" else "Banda")
             fig_gen_hs.update_traces(line=dict(width=2))
-            fig_gen_hs.update_layout(template="simple_white", height=600, plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None))
+            fig_gen_hs.update_layout(template="simple_white", height=600, plot_bgcolor='white', legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None))
             fig_gen_hs.update_yaxes(range=y_range, showgrid=True, gridcolor='LightGray')
             add_spectral_bands_plotly(fig_gen_hs)
             buf_gen_hs = export_formal_general(df_sat, f'{sat_name} - {escena_name}', tipo_datos, color_map, y_range[0], y_range[1])
@@ -850,6 +859,22 @@ def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos
     cobs = all_f['Cobertura'].unique()
     names = all_f['Escena'].unique()
 
+    # --- MAPEO INTELIGENTE DE COLORES POR CAMPAÑA ---
+    scene_color_map = {}
+    july_count = 0
+    for n in names:
+        if "2024-11" in n:
+            scene_color_map[n] = "#D62728" # Rojo
+        elif "2025-04" in n or "2025-05" in n:
+            scene_color_map[n] = "#2CA02C" # Verde
+        elif "2025-07" in n:
+            july_count += 1
+            scene_color_map[n] = "#87CEEB" if july_count == 1 else "#08306B" # Celeste al primero, Azul al segundo
+        elif "2025-11" in n:
+            scene_color_map[n] = "#C875C4" # Morado/Rosado
+        else:
+            scene_color_map[n] = "#7F7F7F" # Gris default si no detecta fecha
+
     if tipo_datos_sesion == "Multiespectral (dron/satélite)":
         for c in cobs:
             df_c_uas = all_f[(all_f['Cobertura'] == c) & (all_f['Sensor'] == 'Uas (nativo)')]
@@ -861,18 +886,18 @@ def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos
             y_range_shared = get_safe_lims(df_c_uas, df_c_sat_nir)
 
             if not df_c_uas.empty:
-                res[f'buf_glob_uas_{c}'] = export_formal_signature(df_c_uas, c, sat_name_sesion, tipo_datos_sesion, color_map, y_range_shared[0], y_range_shared[1], "(Evolución UAS)")
+                res[f'buf_glob_uas_{c}'] = export_formal_signature(df_c_uas, c, sat_name_sesion, tipo_datos_sesion, scene_color_map, y_range_shared[0], y_range_shared[1], "(Evolución UAS)")
             if not df_c_sat.empty:
-                res[f'buf_glob_sat_full_{c}'] = export_formal_signature(df_c_sat, c, sat_name_sesion, tipo_datos_sesion, color_map, y_range_full[0], y_range_full[1], f"(Evol. Completa {sat_name_sesion})")
+                res[f'buf_glob_sat_full_{c}'] = export_formal_signature(df_c_sat, c, sat_name_sesion, tipo_datos_sesion, scene_color_map, y_range_full[0], y_range_full[1], f"(Evol. Completa {sat_name_sesion})")
             if not df_c_sat_nir.empty:
-                res[f'buf_glob_sat_nir_{c}'] = export_formal_signature(df_c_sat_nir, c, sat_name_sesion, tipo_datos_sesion, color_map, y_range_shared[0], y_range_shared[1], f"(Evol. NIR {sat_name_sesion})")
+                res[f'buf_glob_sat_nir_{c}'] = export_formal_signature(df_c_sat_nir, c, sat_name_sesion, tipo_datos_sesion, scene_color_map, y_range_shared[0], y_range_shared[1], f"(Evol. NIR {sat_name_sesion})")
 
     else:
         y_range_g = get_safe_lims(all_f)
         for c in cobs:
             df_c_hs = all_f[(all_f['Cobertura'] == c) & (all_f['Sensor'] == sat_name_sesion)]
             if not df_c_hs.empty:
-                res[f'buf_glob_hs_{c}'] = export_formal_signature(df_c_hs, c, sat_name_sesion, tipo_datos_sesion, color_map, y_range_g[0], y_range_g[1], f"(Evolución {sat_name_sesion})")
+                res[f'buf_glob_hs_{c}'] = export_formal_signature(df_c_hs, c, sat_name_sesion, tipo_datos_sesion, scene_color_map, y_range_g[0], y_range_g[1], f"(Evolución {sat_name_sesion})")
 
     if all_c_filt is not None and not all_c_filt.empty:
         r2_list = []
@@ -887,20 +912,21 @@ def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos
         if r2_list:
             df_r2_glob = pd.DataFrame(r2_list)
             
-            fig, ax = plt.subplots(figsize=(10, 5), dpi=300) 
+            # --- ARREGLO AL GRÁFICO DE BARRAS GLOBAL ---
+            fig, ax = plt.subplots(figsize=(10, 6), dpi=300) 
             df_pivot = df_r2_glob.pivot(index='Cobertura', columns='Escena', values='R2')
             
-            import matplotlib.colors as mcolors
-            cmap = plt.get_cmap('PuBuGn')
-            num_escenas = len(df_pivot.columns)
-            colors = cmap(np.linspace(0.4, 1.0, num_escenas)) 
+            # Asignación estricta de colores personalizados para Matplotlib
+            colors_list = [scene_color_map.get(col, '#7F7F7F') for col in df_pivot.columns]
             
-            df_pivot.plot(kind='bar', ax=ax, color=colors)
+            df_pivot.plot(kind='bar', ax=ax, color=colors_list)
             mean_r2 = df_r2_glob['R2'].mean()
             ax.axhline(y=mean_r2, color='red', linestyle='--', label=f'Promedio global ({mean_r2:.3f})')
             ax.set_title("Comparación R² por cobertura y escena", weight='bold')
             ax.set_ylabel("R²")
             
+            # Forzar inclinación y anclaje perfecto de etiquetas
+            ax.set_xticklabels(df_pivot.index, rotation=45, ha='right', rotation_mode='anchor')
             ax.legend(frameon=True, facecolor='white', edgecolor='black', bbox_to_anchor=(1.02, 1), loc='upper left')
             
             plt.tight_layout()
@@ -911,8 +937,9 @@ def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos
                 df_sub = all_c_filt[all_c_filt['Cobertura'] == c]
                 if len(df_sub) > 2:
                     mod_g, r2_g = calcular_regresion_limpia(df_sub)
-                    res[f'buf_glob_scat_{c}'] = export_formal_scatter(df_sub, f"Regresión radiométrica global: {c}", r2_g, color_col='Escena')
+                    res[f'buf_glob_scat_{c}'] = export_formal_scatter(df_sub, f"Regresión radiométrica global: {c}", r2_g, color_col='Escena', color_map=scene_color_map)
     
+    res['scene_color_map'] = scene_color_map
     return res
 
 # -----------------------------
@@ -1058,6 +1085,23 @@ if st.session_state.get("analisis_listo"):
     if has_vector and len(names) > 0: tab_titles.append("Comparación global")
     tabs = st.tabs(tab_titles)
     
+    # Creamos un color de campaña único incluso para las pestañas individuales para mantener la coherencia total
+    if 'scene_color_map' not in st.session_state:
+        st.session_state.scene_color_map = {}
+        july_count = 0
+        for n in names:
+            if "2024-11" in n:
+                st.session_state.scene_color_map[n] = "#D62728"
+            elif "2025-04" in n or "2025-05" in n:
+                st.session_state.scene_color_map[n] = "#2CA02C"
+            elif "2025-07" in n:
+                july_count += 1
+                st.session_state.scene_color_map[n] = "#87CEEB" if july_count == 1 else "#08306B"
+            elif "2025-11" in n:
+                st.session_state.scene_color_map[n] = "#C875C4"
+            else:
+                st.session_state.scene_color_map[n] = "#7F7F7F"
+    
     if has_vector and 'color_map' not in st.session_state:
         unique_classes = st.session_state.master_gdf[col_clase_input].unique()
         palette = (px.colors.qualitative.Alphabet + px.colors.qualitative.Dark24 + px.colors.qualitative.Light24) * 5 
@@ -1080,7 +1124,7 @@ if st.session_state.get("analisis_listo"):
                     pbar.progress(33)
                     
                     status_text.info("Procesamiento: modelado de firmas espectrales y reportes...")
-                    d['pre_p_f'], d['pre_p_plt'], d['fig_gen_uas'], d['buf_gen_uas'], d['fig_gen_sat'], d['buf_gen_sat'], d['fig_gen_hs'], d['buf_gen_hs'], d['fig_gen_sat_nir'], d['buf_gen_sat_nir'] = pre_generar_graficos(df_f, sat_name_sesion, tipo_datos_sesion, st.session_state.color_map, name)
+                    d['pre_p_f'], d['pre_p_plt'], d['fig_gen_uas'], d['buf_gen_uas'], d['fig_gen_sat'], d['buf_gen_sat'], d['fig_gen_hs'], d['buf_gen_hs'], d['fig_gen_sat_nir'], d['buf_gen_sat_nir'] = pre_generar_graficos(df_f, sat_name_sesion, tipo_datos_sesion, st.session_state.color_map, name, st.session_state.scene_color_map)
                     pbar.progress(66)
                     
                     if st.session_state.usar_cartografia and tipo_datos_sesion == "Multiespectral (dron/satélite)":
@@ -1256,8 +1300,10 @@ if st.session_state.get("analisis_listo"):
                                 with idx_tabs[k]:
                                     df_ind_filt = df_ind[df_ind['Índice'] == idx_sel]
                                     
-                                    fig_box = px.box(df_ind_filt, x="Cobertura", y="Valor", color="Sensor", title=f"Índice {idx_sel}", color_discrete_map={'Uas (10m)': '#1f77b4', 'Uas (nativo)': '#2ca02c', sat_name_sesion: '#8c564b'})
-                                    fig_box.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None))
+                                    fig_box = px.violin(df_ind_filt, x="Cobertura", y="Valor", color="Sensor", 
+                                                        box=True, points="all", title=f"Distribución {idx_sel} (Violin + Boxplot + Jitter)", 
+                                                        color_discrete_map={'Uas (10m)': '#1f77b4', 'Uas (nativo)': '#2ca02c', sat_name_sesion: '#8c564b'})
+                                    fig_box.update_layout(violinmode='group', template="simple_white", plot_bgcolor='white', legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None))
                                     fig_box.update_xaxes(showgrid=True, gridcolor='LightGray')
                                     fig_box.update_yaxes(showgrid=True, gridcolor='LightGray')
 
@@ -1288,7 +1334,7 @@ if st.session_state.get("analisis_listo"):
                                             fig_idx.add_trace(go.Scatter(x=x_range_idx['Uas'], y=mod_idx.predict(x_range_idx), mode='lines', name='Tendencia', line=dict(color='black', width=2, dash='dot')))
                                             fig_idx.add_trace(go.Scatter(x=lims_idx, y=lims_idx, mode='lines', name='Relación 1:1', line=dict(color='gray', width=1.5, dash='dot')))
 
-                                            fig_idx.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                                            fig_idx.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None), margin=dict(l=10, r=10, t=40, b=80))
                                             fig_idx.update_xaxes(range=lims_idx, constrain='domain', showgrid=True, gridcolor='LightGray')
                                             fig_idx.update_yaxes(range=lims_idx, scaleanchor="x", scaleratio=1, showgrid=True, gridcolor='LightGray')
                                             
@@ -1317,7 +1363,11 @@ if st.session_state.get("analisis_listo"):
                                         r2_list_escena.append({'Cobertura': c, 'R2': r2_val})
                                 if r2_list_escena:
                                     df_r2 = pd.DataFrame(r2_list_escena)
-                                    fig_r2 = px.bar(df_r2, x='Cobertura', y='R2', color='R2', color_continuous_scale='PuBuGn', title="Ajuste radiométrico general (escena actual)")
+                                    # Aplicar color consistente también al gráfico de la escena individual
+                                    c_escena = st.session_state.scene_color_map.get(name, '#1f77b4')
+                                    
+                                    fig_r2 = px.bar(df_r2, x='Cobertura', y='R2', title="Ajuste radiométrico general (escena actual)")
+                                    fig_r2.update_traces(marker_color=c_escena)
                                     mean_r2 = df_r2['R2'].mean()
                                     fig_r2.add_hline(y=mean_r2, line_dash="dash", line_color="#d62728", annotation_text=f"Promedio: {mean_r2:.3f}", annotation_position="top right")
                                     fig_r2.update_layout(template="simple_white")
@@ -1327,10 +1377,12 @@ if st.session_state.get("analisis_listo"):
                                     with c_r2_dl:
                                         st.write(" "); st.write(" ")
                                         fig_b, ax_b = plt.subplots(figsize=(9, 5), dpi=300)
-                                        df_r2.set_index('Cobertura')['R2'].plot(kind='bar', ax=ax_b, color='#1f77b4')
+                                        df_r2.set_index('Cobertura')['R2'].plot(kind='bar', ax=ax_b, color=c_escena)
                                         ax_b.axhline(y=mean_r2, color='red', linestyle='--', label=f'Promedio ({mean_r2:.3f})')
                                         ax_b.set_title(f"Comparación R² por cobertura - {name}", weight='bold')
                                         ax_b.set_ylabel("R²")
+                                        # Inclinación y anclaje forzado
+                                        ax_b.set_xticklabels(ax_b.get_xticklabels(), rotation=45, ha='right', rotation_mode='anchor')
                                         ax_b.legend(frameon=True, facecolor='white', edgecolor='black', bbox_to_anchor=(1.02, 1), loc='upper left')
                                         plt.tight_layout()
                                         buf_b = io.BytesIO(); fig_b.savefig(buf_b, format="png", bbox_inches='tight'); plt.close(fig_b)
@@ -1347,7 +1399,7 @@ if st.session_state.get("analisis_listo"):
                                 fig_glob.add_trace(go.Scatter(x=x_range_glob['Uas'], y=mod_glob.predict(x_range_glob), mode='lines', name='Tendencia', line=dict(color='black', width=2, dash='dot')))
                                 fig_glob.add_trace(go.Scatter(x=lims_glob, y=lims_glob, mode='lines', name='Relación 1:1', line=dict(color='gray', width=1.5, dash='dot')))
 
-                                fig_glob.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                                fig_glob.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None), margin=dict(l=10, r=10, t=40, b=80))
                                 fig_glob.update_xaxes(range=lims_glob, constrain='domain', showgrid=True, gridcolor='LightGray')
                                 fig_glob.update_yaxes(range=lims_glob, scaleanchor="x", scaleratio=1, showgrid=True, gridcolor='LightGray')
                                 
@@ -1431,6 +1483,7 @@ if st.session_state.get("analisis_listo"):
             all_i = st.session_state.get('df_global_all_i')
             glob_buf = st.session_state['global_buffers']
             cobs = all_f['Cobertura'].unique()
+            scene_color_map = glob_buf.get('scene_color_map', {})
 
             if tipo_datos_sesion == "Multiespectral (dron/satélite)":
                 gt1, gt2, gt3, gt4 = st.tabs(["Evolución UAS", "Evolución satélite", "Resumen de ajuste global (r²)", "Evolución fenológica (Índices)"])
@@ -1442,9 +1495,9 @@ if st.session_state.get("analisis_listo"):
                         y_range_c = get_safe_lims(df_c_uas, df_c_sat_nir)
 
                         if not df_c_uas.empty:
-                            fig = px.line(df_c_uas, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"Uas nativo: {c}")
+                            fig = px.line(df_c_uas, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"Uas nativo: {c}", color_discrete_map=scene_color_map)
                             fig.update_traces(line=dict(width=2), marker=dict(size=8))
-                            fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                            fig.update_layout(template="simple_white", legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None), margin=dict(l=10, r=10, t=40, b=80))
                             fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
                             fig.update_yaxes(range=y_range_c, showgrid=True, gridcolor='LightGray')
                             with cols[i % 3]: 
@@ -1462,9 +1515,9 @@ if st.session_state.get("analisis_listo"):
                             y_range_full = get_safe_lims(df_c)
 
                             if not df_c.empty:
-                                fig = px.line(df_c, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"Satélite: {c} (Completa)")
+                                fig = px.line(df_c, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"Satélite: {c} (Completa)", color_discrete_map=scene_color_map)
                                 fig.update_traces(line=dict(width=2), marker=dict(size=8))
-                                fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                                fig.update_layout(template="simple_white", legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None), margin=dict(l=10, r=10, t=40, b=80))
                                 fig.update_xaxes(categoryorder='array', categoryarray=["Azul", "Verde", "Rojo", "Red edge", "Nir", "Swir 1", "Swir 2"], showgrid=True, gridcolor='LightGray')
                                 fig.update_yaxes(range=y_range_full, showgrid=True, gridcolor='LightGray')
                                 with cols_full[i % 3]: 
@@ -1481,9 +1534,9 @@ if st.session_state.get("analisis_listo"):
                             y_range_shared_nir = get_safe_lims(df_c_uas, df_c_sat_nir)
 
                             if not df_c_sat_nir.empty:
-                                fig = px.line(df_c_sat_nir, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"Satélite: {c} (Solo hasta NIR)")
+                                fig = px.line(df_c_sat_nir, x="Banda", y="Reflectancia", color="Escena", markers=True, title=f"Satélite: {c} (Solo hasta NIR)", color_discrete_map=scene_color_map)
                                 fig.update_traces(line=dict(width=2), marker=dict(size=8))
-                                fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                                fig.update_layout(template="simple_white", legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None), margin=dict(l=10, r=10, t=40, b=80))
                                 fig.update_xaxes(categoryorder='array', categoryarray=bandas_nir, showgrid=True, gridcolor='LightGray')
                                 fig.update_yaxes(range=y_range_shared_nir, showgrid=True, gridcolor='LightGray')
                                 with cols_nir[i % 3]: 
@@ -1507,10 +1560,10 @@ if st.session_state.get("analisis_listo"):
                                         r2_list.append({'Escena': n, 'Cobertura': c, 'R2': r2_val})
                             if r2_list:
                                 df_r2_glob = pd.DataFrame(r2_list)
-                                fig_r2_glob = px.bar(df_r2_glob, x='Cobertura', y='R2', color='Escena', barmode='group', title="Comparación r² por cobertura y escena", color_discrete_sequence=px.colors.sequential.PuBuGn[2:])
+                                fig_r2_glob = px.bar(df_r2_glob, x='Cobertura', y='R2', color='Escena', barmode='group', title="Comparación r² por cobertura y escena", color_discrete_map=scene_color_map)
                                 promedio_total = df_r2_glob['R2'].mean()
                                 fig_r2_glob.add_hline(y=promedio_total, line_dash="dash", line_color="#d62728", annotation_text=f"Promedio global: {promedio_total:.3f}", annotation_position="top right")
-                                fig_r2_glob.update_layout(template="simple_white")
+                                fig_r2_glob.update_layout(template="simple_white", legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None))
                                 
                                 c_g_r2, c_g_r2_dl = st.columns([4,1])
                                 with c_g_r2: st.plotly_chart(fig_r2_glob, width="stretch", config={'toImageButtonOptions': {'format': 'png', 'filename': 'R2_Global'}}, key="glob_bar_r2")
@@ -1525,7 +1578,7 @@ if st.session_state.get("analisis_listo"):
                                 df_sub = all_c_filt[all_c_filt['Cobertura'] == c]
                                 if len(df_sub) > 2:
                                     mod_g, r2_g = calcular_regresion_limpia(df_sub)
-                                    fig = px.scatter(df_sub, x="Uas", y="Sat", color="Escena", title=f"{c} (r² general = {r2_g:.3f})")
+                                    fig = px.scatter(df_sub, x="Uas", y="Sat", color="Escena", title=f"{c} (r² general = {r2_g:.3f})", color_discrete_map=scene_color_map)
                                     
                                     lims_glob_c = get_safe_lims_scatter(df_sub, 'Uas', 'Sat')
 
@@ -1533,7 +1586,7 @@ if st.session_state.get("analisis_listo"):
                                     fig.add_trace(go.Scatter(x=x_range['Uas'], y=mod_g.predict(x_range), mode='lines', name='Tendencia global', line=dict(color='black', width=2, dash='dot')))
                                     fig.add_trace(go.Scatter(x=lims_glob_c, y=lims_glob_c, mode='lines', name='Relación 1:1', line=dict(color='gray', width=1.5, dash='dot')))
 
-                                    fig.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                                    fig.update_layout(template="simple_white", plot_bgcolor='white', legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None), margin=dict(l=10, r=10, t=40, b=80))
                                     fig.update_xaxes(range=lims_glob_c, constrain='domain', showgrid=True, gridcolor='LightGray')
                                     fig.update_yaxes(range=lims_glob_c, scaleanchor="x", scaleratio=1, showgrid=True, gridcolor='LightGray')
                                     with cols[i % 3]: 
@@ -1561,7 +1614,7 @@ if st.session_state.get("analisis_listo"):
                                                        color_discrete_map={'Uas (10m)':'#1f77b4', 'Uas (nativo)':'#2ca02c', sat_name_sesion:'#8c564b'})
                                 fig_idx_evol.update_traces(line=dict(width=3), marker=dict(size=10))
                                 fig_idx_evol.update_layout(template="simple_white",
-                                                           legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None),
+                                                           legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None),
                                                            margin=dict(l=10, r=10, t=40, b=80))
                                 fig_idx_evol.update_xaxes(showgrid=True, gridcolor='LightGray', title="Campaña / Escena")
                                 fig_idx_evol.update_yaxes(showgrid=True, gridcolor='LightGray', title=f"Valor Medio {idx_sel_glob}")
@@ -1584,8 +1637,8 @@ if st.session_state.get("analisis_listo"):
                              df_c['Wavelength'] = df_c['Banda'].astype(str).str.extract(r'(\d+)').astype(float)
                              x_col = "Wavelength" if not df_c['Wavelength'].isnull().all() else "idx_real"
                              df_c = df_c.sort_values(['Escena', x_col])
-                             fig = px.line(df_c, x=x_col, y="Reflectancia", color="Escena", markers=False, title=f"Evolución hiperespectral: {c}")
-                             fig.update_layout(template="simple_white", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5, title=None), margin=dict(l=10, r=10, t=40, b=80))
+                             fig = px.line(df_c, x=x_col, y="Reflectancia", color="Escena", markers=False, title=f"Evolución hiperespectral: {c}", color_discrete_map=scene_color_map)
+                             fig.update_layout(template="simple_white", legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02, title=None), margin=dict(l=10, r=10, t=40, b=80))
                              fig.update_xaxes(showgrid=True, gridcolor='LightGray', title="Longitud de onda (nm)" if x_col == "Wavelength" else "Banda")
                              fig.update_yaxes(range=y_range_g, showgrid=True, gridcolor='LightGray')
                              add_spectral_bands_plotly(fig)
