@@ -438,13 +438,26 @@ def inicializar_base(uas_file, sat_file, master_crs, master_gdf, col_clase, tipo
             dest.write(out_image); dest.descriptions = desc
         return out_p
 
+    # 1. Recortamos a la caja común
     if data['has_sat']: data['sat_clip_path'] = recortar_a_caja(sat_path_temp, caja_comun)
     if data['has_uas']: data['uas_path_raw'] = recortar_a_caja(uas_path_temp, caja_comun)
 
+    # 2. IDENTIFICACIÓN DINÁMICA DE RESOLUCIÓN
+    sat_res_dinamica = 10.0 # Por defecto asume 10m si no hay satélite
+    if data['has_sat']:
+        with rasterio.open(data['sat_clip_path']) as src_sat:
+            # src_sat.transform[0] lee el tamaño exacto del píxel en el eje X
+            sat_res_dinamica = src_sat.transform[0] 
+
     if data['has_uas']:
+        # Opcional: Leemos la nativa del dron solo para que quede en el registro
+        with rasterio.open(data['uas_path_raw']) as src_uas:
+            data['uas_native_res'] = src_uas.transform[0]
+
         if tipo_datos == "Multiespectral (dron/satélite)":
-            data['uas_path_1m'] = resample_raster(data['uas_path_raw'], target_res=2.0)
-            data['uas_path_10m'] = resample_raster(data['uas_path_raw'], target_res=10.0)
+            data['uas_path_1m'] = resample_raster(data['uas_path_raw'], target_res=2.0) # Este se usa solo para visualización
+            # AQUÍ OCURRE LA MAGIA: Remuestreamos el dron EXACTAMENTE a la escala del satélite (sea 10m, 30m o 3m)
+            data['uas_path_10m'] = resample_raster(data['uas_path_raw'], target_res=sat_res_dinamica) 
         else:
             data['uas_path_1m'] = data['uas_path_raw']
             data['uas_path_10m'] = data['uas_path_raw']
