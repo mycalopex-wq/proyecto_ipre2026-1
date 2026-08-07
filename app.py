@@ -1672,3 +1672,5 @@ else:
     * **4. Interpretación de Resultados:** La plataforma generará automáticamente firmas espectrales comparativas y gráficos de dispersión. Un $R^2$ cercano a 1.0 valida la fiabilidad radiométrica de la captura del dron respecto al satélite.
     * **5. Descarga de Informes:** Todos los gráficos poseen un botón estandarizado para descargar la imagen en alta resolución (PNG), lista para anexar a sus reportes y documentos.
     """)
+
+    
