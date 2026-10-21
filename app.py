@@ -100,6 +100,58 @@ def calcular_regresion_limpia(df_sub):
     r2 = r2_score(y, model.predict(X))
     return model, r2
 
+def calcular_metricas(df_sub, x='Uas', y='Sat'):
+    """Métricas de concordancia Satélite (y) vs Dron (x).
+    - Pendiente / intercepto / R²: de la regresión Sat = a + b·Uas.
+    - Sesgo, MAE y RMSE: error directo Sat - Uas (contra la línea 1:1)."""
+    d = df_sub[[x, y]].dropna()
+    if len(d) < 3: return None
+    X, yv = d[[x]].values, d[y].values
+    mod = LinearRegression().fit(X, yv)
+    err = yv - d[x].values
+    return {'n': int(len(d)), 'R²': float(r2_score(yv, mod.predict(X))),
+            'Pendiente': float(mod.coef_[0]), 'Intercepto': float(mod.intercept_),
+            'Sesgo (Sat − Uas)': float(err.mean()), 'MAE': float(np.abs(err).mean()),
+            'RMSE': float(np.sqrt((err ** 2).mean()))}
+
+def tabla_metricas(df, grupos=None):
+    """Tabla de métricas por grupo (columna o lista de columnas). Sin grupos: una fila global."""
+    if df is None or len(df) == 0: return pd.DataFrame()
+    if not grupos:
+        m = calcular_metricas(df)
+        return pd.DataFrame([{'Grupo': 'Global', **m}]).round(4) if m else pd.DataFrame()
+    if isinstance(grupos, str): grupos = [grupos]
+    filas = []
+    for clave, sub in df.groupby(grupos, sort=False):
+        m = calcular_metricas(sub)
+        if m is None: continue
+        clave = clave if isinstance(clave, tuple) else (clave,)
+        filas.append({**dict(zip(grupos, clave)), **m})
+    return pd.DataFrame(filas).round(4) if filas else pd.DataFrame()
+
+def mostrar_tabla_metricas(df, grupos=None):
+    t = tabla_metricas(df, grupos)
+    if t.empty: st.info("No hay suficientes datos (mínimo 3 puntos válidos por grupo).")
+    else: st.dataframe(t, hide_index=True, width="stretch")
+
+def mostrar_metricas_ajuste(df):
+    st.markdown("**Métricas de ajuste (Satélite vs Dron)**")
+    st.caption("Sesgo, MAE y RMSE miden el error directo entre sensores (contra la línea 1:1), en unidades de reflectancia. Pendiente, intercepto y R² provienen de la regresión Sat = a + b · Dron. Hay buena concordancia cuando la pendiente es cercana a 1, el intercepto y el sesgo cercanos a 0, y el RMSE es bajo.")
+    t = st.tabs(["Global", "Por cobertura", "Por banda", "Cobertura × banda"])
+    with t[0]: mostrar_tabla_metricas(df)
+    with t[1]: mostrar_tabla_metricas(df, 'Cobertura')
+    with t[2]: mostrar_tabla_metricas(df, 'Banda')
+    with t[3]: mostrar_tabla_metricas(df, ['Cobertura', 'Banda'])
+    st.caption("Atención: el R² global y por cobertura agrupa todas las bandas, y las diferencias naturales entre bandas (ej. NIR vs azul) lo elevan. Para evaluar la calidad radiométrica del dron, priorice las métricas por banda y por cobertura × banda.")
+
+def mostrar_metricas_globales(df):
+    st.markdown("### Métricas de ajuste por escena")
+    st.caption("Mismas métricas que en cada escena, comparadas entre campañas. Sesgo, MAE y RMSE están en unidades de reflectancia.")
+    t = st.tabs(["Por escena", "Escena × cobertura", "Escena × banda"])
+    with t[0]: mostrar_tabla_metricas(df, 'Escena')
+    with t[1]: mostrar_tabla_metricas(df, ['Escena', 'Cobertura'])
+    with t[2]: mostrar_tabla_metricas(df, ['Escena', 'Banda'])
+
 @st.cache_data
 def reproject_raster(in_path, target_crs_str):
     target_crs = rasterio.crs.CRS.from_string(target_crs_str)
@@ -190,6 +242,33 @@ def parse_scene_name(filename):
         lugar = match.group(2).replace('-', ' ').title()
         return f"{lugar} ({fecha})"
     return os.path.splitext(filename)[0]
+
+def asignar_colores_escenas(names):
+    """Asigna un color distinto a cada escena.
+    Las campañas conocidas conservan su color histórico; el resto recibe
+    colores de una paleta, sin repetir ninguno de los ya usados."""
+    fijos, colores, july_count = {}, {}, 0
+    for n in names:
+        if "2024-11" in n: fijos[n] = "#D62728"
+        elif "2025-04" in n or "2025-05" in n: fijos[n] = "#2CA02C"
+        elif "2025-07" in n:
+            july_count += 1
+            fijos[n] = "#87CEEB" if july_count == 1 else "#08306B"
+        elif "2025-11" in n: fijos[n] = "#C875C4"
+    def a_hex(c):
+        if c.startswith('rgb'):
+            r, g, b = [int(float(x)) for x in c[c.index('(') + 1:c.index(')')].split(',')[:3]]
+            return '#{:02X}{:02X}{:02X}'.format(r, g, b)
+        return c.upper()
+    usados = {v.upper() for v in fijos.values()}
+    paleta = [a_hex(c) for c in (px.colors.qualitative.Bold + px.colors.qualitative.Safe + px.colors.qualitative.Vivid)]
+    paleta = [c for c in paleta if c not in usados]
+    k = 0
+    for n in names:
+        if n in fijos: colores[n] = fijos[n]
+        else:
+            colores[n] = paleta[k % len(paleta)]; k += 1
+    return colores
 
 def add_spectral_bands_plotly(fig):
     regiones = [(450, 495, "blue", "Azul"), (495, 570, "green", "Verde"), (620, 750, "red", "Rojo"),
@@ -859,21 +938,8 @@ def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos
     cobs = all_f['Cobertura'].unique()
     names = all_f['Escena'].unique()
 
-    # --- MAPEO INTELIGENTE DE COLORES POR CAMPAÑA ---
-    scene_color_map = {}
-    july_count = 0
-    for n in names:
-        if "2024-11" in n:
-            scene_color_map[n] = "#D62728" # Rojo
-        elif "2025-04" in n or "2025-05" in n:
-            scene_color_map[n] = "#2CA02C" # Verde
-        elif "2025-07" in n:
-            july_count += 1
-            scene_color_map[n] = "#87CEEB" if july_count == 1 else "#08306B" # Celeste al primero, Azul al segundo
-        elif "2025-11" in n:
-            scene_color_map[n] = "#C875C4" # Morado/Rosado
-        else:
-            scene_color_map[n] = "#7F7F7F" # Gris default si no detecta fecha
+    # Colores por escena: se reutiliza el mapa de la sesión para que coincidan en todas las pestañas
+    scene_color_map = {**asignar_colores_escenas(list(names)), **st.session_state.get('scene_color_map', {})}
 
     if tipo_datos_sesion == "Multiespectral (dron/satélite)":
         for c in cobs:
@@ -943,6 +1009,173 @@ def pre_generar_graficos_globales(all_f, all_c_filt, sat_name_sesion, tipo_datos
     return res
 
 # -----------------------------
+# Descarga masiva (ZIP)
+# -----------------------------
+def _nombre_seguro(txt):
+    return re.sub(r'[^\w\-\.\(\)]+', '_', str(txt), flags=re.UNICODE).strip('_') or "sin_nombre"
+
+def construir_zip(data_escenas, tipo_datos, sat_name, bandas_config, params, color_map, scene_color_map, glob,
+                  incluir_bandas=False, progreso=None):
+    """Reúne en un ZIP todo lo descargable de la sesión. Devuelve (bytes, cantidad_de_archivos)."""
+    import datetime as _dt
+    buf = io.BytesIO()
+    z = zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED)
+    contenido = []
+    def add(ruta, datos):
+        z.writestr(ruta, datos); contenido.append(ruta)
+    def add_csv(ruta, df):
+        if df is not None and len(df) > 0: add(ruta, df.to_csv(index=False).encode('utf-8-sig'))
+
+    names = list(data_escenas.keys())
+    multi = (tipo_datos == "Multiespectral (dron/satélite)")
+    total = len(names) + 1
+    scene_color_map = scene_color_map or {}
+
+    for k, name in enumerate(names):
+        if progreso: progreso(k / total, f"Escena {name}")
+        d = data_escenas[name]
+        base = f"escenas/{_nombre_seguro(name)}"
+
+        # Mapas
+        for clave, png in (d.get('pre_m') or {}).items(): add(f"{base}/mapas/{_nombre_seguro(clave)}.png", png)
+        if incluir_bandas and multi:
+            for sensor, ruta, activo in [("Uas", d.get('uas_path_1m'), d.get('has_uas')), ("Satélite", d.get('sat_clip_path'), d.get('has_sat'))]:
+                if not activo or not ruta: continue
+                with rasterio.open(ruta) as s_r: nb = min(s_r.count, 12)
+                for b in range(1, nb + 1):
+                    png = generar_mapa_crudo(d, sensor, "Banda individual", bandas_config, params['sat_scale'], params['sat_offset'], params['uas_scale'], params['uas_offset'], name, b)
+                    add(f"{base}/mapas/banda_individual/{_nombre_seguro(sensor)}_Banda_{b}.png", png)
+
+        # Firmas espectrales
+        for clave, nombre in [('buf_gen_uas', "Firmas_UAS"), ('buf_gen_sat', "Firmas_Satelite_Completa"),
+                              ('buf_gen_sat_nir', "Firmas_Satelite_hasta_NIR"), ('buf_gen_hs', "Firmas_Hiperespectral")]:
+            if d.get(clave): add(f"{base}/firmas/{nombre}.png", d[clave])
+        for c, png in (d.get('pre_p_plt') or {}).items(): add(f"{base}/firmas/por_cobertura/Firma_{_nombre_seguro(c)}.png", png)
+
+        # Índices
+        for i, png in (d.get('idx_buffers') or {}).items(): add(f"{base}/indices/Distribucion_{_nombre_seguro(i)}.png", png)
+        for i, png in (d.get('idx_scat_buffers') or {}).items(): add(f"{base}/indices/Dispersion_{_nombre_seguro(i)}.png", png)
+
+        # Ajuste radiométrico
+        for c, png in (d.get('reg_buffers') or {}).items(): add(f"{base}/ajuste_radiometrico/por_cobertura/Regresion_{_nombre_seguro(c)}.png", png)
+        for b, png in (d.get('reg_band_buffers') or {}).items(): add(f"{base}/ajuste_radiometrico/por_banda/Regresion_Banda_{_nombre_seguro(b)}.png", png)
+        df_c = d.get('df_corr')
+        if df_c is not None and len(df_c) > 0:
+            tm = tabla_metricas(df_c, 'Cobertura')
+            if not tm.empty:
+                fig, ax = plt.subplots(figsize=(9, 5), dpi=300)
+                tm.set_index('Cobertura')['R²'].plot(kind='bar', ax=ax, color=scene_color_map.get(name, '#1f77b4'))
+                ax.axhline(tm['R²'].mean(), color='red', linestyle='--', label=f"Promedio ({tm['R²'].mean():.3f})")
+                ax.set_title(f"Comparación R² por cobertura - {name}", weight='bold'); ax.set_ylabel("R²")
+                ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right', rotation_mode='anchor')
+                ax.legend(frameon=True, facecolor='white', edgecolor='black', bbox_to_anchor=(1.02, 1), loc='upper left')
+                plt.tight_layout(); b_io = io.BytesIO(); fig.savefig(b_io, format="png", bbox_inches='tight'); plt.close(fig)
+                add(f"{base}/ajuste_radiometrico/R2_por_cobertura.png", b_io.getvalue())
+            if len(df_c) > 2:
+                _, r2g = calcular_regresion_limpia(df_c)
+                add(f"{base}/ajuste_radiometrico/Regresion_Global.png", export_formal_scatter(df_c, f"Regresión radiométrica global ({name})", r2g, color_col='Cobertura', color_map=color_map))
+
+        # Tablas (CSV)
+        add_csv(f"{base}/datos/firmas.csv", d.get('df_firmas'))
+        add_csv(f"{base}/datos/correlacion_bandas.csv", df_c)
+        add_csv(f"{base}/datos/indices.csv", d.get('df_indices'))
+        add_csv(f"{base}/datos/correlacion_indices.csv", d.get('df_corr_idx'))
+        add_csv(f"{base}/datos/metricas_global.csv", tabla_metricas(df_c))
+        add_csv(f"{base}/datos/metricas_por_cobertura.csv", tabla_metricas(df_c, 'Cobertura'))
+        add_csv(f"{base}/datos/metricas_por_banda.csv", tabla_metricas(df_c, 'Banda'))
+        add_csv(f"{base}/datos/metricas_cobertura_banda.csv", tabla_metricas(df_c, ['Cobertura', 'Banda']))
+        add_csv(f"{base}/datos/metricas_indices.csv", tabla_metricas(d.get('df_corr_idx'), ['Índice', 'Cobertura']))
+        gd = d.get('gdf_diss')
+        if gd is not None and len(gd) > 0:
+            sup = pd.DataFrame(gd.drop(columns='geometry'))
+            sup['area_ha'] = sup['area_m2'] / 10000.0
+            add_csv(f"{base}/datos/superficie_por_cobertura.csv", sup)
+
+    # Comparación global
+    if progreso: progreso(len(names) / total, "Comparación global")
+    all_f, all_c, all_i, gbuf = (glob or {}).get('all_f'), (glob or {}).get('all_c'), (glob or {}).get('all_i'), (glob or {}).get('buffers') or {}
+    if all_f is not None:
+        add_csv("global/datos/firmas_globales.csv", all_f)
+        add_csv("global/datos/correlaciones_globales.csv", all_c)
+        add_csv("global/datos/indices_globales.csv", all_i)
+        add_csv("global/datos/metricas_por_escena.csv", tabla_metricas(all_c, 'Escena'))
+        add_csv("global/datos/metricas_escena_cobertura.csv", tabla_metricas(all_c, ['Escena', 'Cobertura']))
+        add_csv("global/datos/metricas_escena_banda.csv", tabla_metricas(all_c, ['Escena', 'Banda']))
+        for clave, png in gbuf.items():
+            if clave.startswith('buf_') and isinstance(png, (bytes, bytearray)):
+                add(f"global/graficos/{_nombre_seguro(clave[4:])}.png", bytes(png))
+        if all_i is not None and len(all_i) > 0:
+            medias = all_i.groupby(['Índice', 'Cobertura', 'Escena', 'Sensor'])['Valor'].mean().reset_index()
+            for ind in medias['Índice'].unique():
+                for c in medias['Cobertura'].unique():
+                    sub = medias[(medias['Índice'] == ind) & (medias['Cobertura'] == c)]
+                    if not sub.empty:
+                        add(f"global/graficos/Evolucion_{_nombre_seguro(ind)}_{_nombre_seguro(c)}.png", export_formal_temporal_index(sub, ind, c, sat_name))
+
+    # Archivo explicativo
+    ahora = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    leeme = f"""RESULTADOS - Plataforma de Validación Espectral y Multitemporal
+Generado: {ahora}
+
+PARÁMETROS DE LA CORRIDA
+Modalidad: {tipo_datos}
+Satélite: {sat_name}
+Escala / offset satélite: {params['sat_scale']} / {params['sat_offset']}
+Escala / offset dron: {params['uas_scale']} / {params['uas_offset']}
+Reflectancia = (valor del pixel + offset) / escala
+Bandas dron (nº desde 1; 0 = no existe) [azul, verde, rojo, red edge, nir, swir1, swir2]: {bandas_config.get('uas')}
+Bandas satélite: {bandas_config.get('sat')}
+Escenas: {', '.join(names)}
+
+ESTRUCTURA
+escenas/<escena>/mapas/                  Mapas (RGB, falso color, índices, banda individual)
+escenas/<escena>/firmas/                 Firmas espectrales (generales y por cobertura)
+escenas/<escena>/indices/                Distribución y dispersión dron vs satélite por índice
+escenas/<escena>/ajuste_radiometrico/    Regresiones y R²
+escenas/<escena>/datos/                  Tablas CSV (firmas, correlaciones, índices, métricas, superficies)
+global/graficos/                         Evolución entre escenas, R² global, regresiones consolidadas
+global/datos/                            Tablas CSV consolidadas y métricas por escena
+
+MÉTRICAS DE AJUSTE (Satélite vs Dron)
+n: puntos válidos en ambos sensores.
+Pendiente, Intercepto, R²: de la regresión Sat = a + b · Dron.
+Sesgo (Sat - Uas): promedio de (Sat - Dron). MAE: error absoluto medio. RMSE: raíz del error cuadrático medio.
+Sesgo, MAE y RMSE se calculan contra la línea 1:1 (unidades de reflectancia o del índice).
+El R² global y por cobertura agrupa todas las bandas y suele quedar elevado; para evaluar al dron, priorice las métricas por banda.
+
+Archivos incluidos: {len(contenido)}
+"""
+    add("LEEME.txt", leeme.encode('utf-8'))
+    z.close()
+    return buf.getvalue(), len(contenido)
+
+@st.fragment
+def panel_descarga_zip():
+    ss = st.session_state
+    with st.container(border=True):
+        st.markdown("#### Descargar todos los resultados (ZIP)")
+        st.caption("Reúne en un solo archivo comprimido todo lo descargable de todas las escenas y de la comparación global: mapas y gráficos (PNG), tablas (CSV) y métricas de ajuste, ordenados en carpetas. Las descargas individuales siguen disponibles en cada gráfico.")
+        multi = (ss.get('tipo_datos') == "Multiespectral (dron/satélite)")
+        incluir = st.checkbox("Incluir los mapas de banda individual (más lento)", key="zip_bandas") if multi else False
+        if st.button("Preparar ZIP", key="zip_preparar"):
+            barra = st.progress(0.0, text="Preparando archivos...")
+            glob = {'all_f': ss.get('df_global_all_f'), 'all_c': ss.get('df_global_all_c'),
+                    'all_i': ss.get('df_global_all_i'), 'buffers': ss.get('global_buffers')}
+            try:
+                datos, n_arch = construir_zip(ss.data_escenas, ss.get('tipo_datos'), ss.get('sat_name', 'Satélite'),
+                                              ss.get('bandas_config', {}), ss.params_run, ss.get('color_map'),
+                                              ss.get('scene_color_map'), glob, incluir_bandas=incluir,
+                                              progreso=lambda f, t: barra.progress(min(f, 1.0), text=t))
+                ss['zip_bytes'], ss['zip_n'] = datos, n_arch
+                ss['zip_nombre'] = "resultados_" + __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M") + ".zip"
+            except Exception as err:
+                st.error(f"No se pudo generar el ZIP: {err}")
+            barra.empty()
+        if ss.get('zip_bytes'):
+            st.download_button("Descargar ZIP", data=ss['zip_bytes'], file_name=ss['zip_nombre'], mime="application/zip", type="primary", key="zip_descargar")
+            st.caption(f"{ss['zip_n']} archivos · {len(ss['zip_bytes']) / 1e6:.1f} MB")
+
+# -----------------------------
 # 3. Interfaz (sidebar)
 # -----------------------------
 with st.sidebar:
@@ -950,6 +1183,7 @@ with st.sidebar:
     tipo_datos = st.selectbox("Modalidad de análisis", ["1. Multiespectral (dron/satélite)", "2. Hiperespectral"])
     
     with st.expander("1. Archivo vectorial (opcional)", expanded=False):
+        st.caption("Suba un .zip con el shapefile completo (.shp, .shx, .dbf y .prj) o un .gpkg. Cada polígono debe tener un atributo que identifique su cobertura (ej. agua, vegetación, suelo). Sin vector, la plataforma funciona solo como visor espacial.")
         vector_file = st.file_uploader("Archivo vectorial", type=["zip", "gpkg", "GPKG"])
         if vector_file:
             preview_gdf = load_vector_preview(vector_file)
@@ -966,6 +1200,7 @@ with st.sidebar:
     st.markdown("---")
             
     num_escenas = st.number_input("2. Cantidad de escenas a analizar", 1, 10, 1)
+    st.caption("Nombre sugerido de los archivos: AAAA-MM-DD_Lugar_....tif (ej. 2025-07-15_Laguna-Verde_dron.tif). La plataforma lo usa para titular la escena como 'Laguna Verde (2025-07-15)'. El primer archivo de la escena 1 define el sistema de coordenadas de todo el proyecto (debe ser proyectado, ej. UTM).")
     archivos_escenas = []
     for i in range(1, num_escenas + 1):
         with st.expander(f"Archivos escena {i}", expanded=True if i == 1 else False):
@@ -992,7 +1227,7 @@ with st.sidebar:
     
     st.markdown("*Satélite*")
     sat_preset = st.selectbox("Seleccionar sensor satelital:", list(presets_satelites.keys()), index=list(presets_satelites.keys()).index("Prisma (L2D)") if "Hiperespectral" in tipo_datos else 2)
-    st.caption("Nota: GEE usa Escala 10000. Si tu imagen es Sentinel-2 desde Copérnico (2022 en adelante), usa el preset post-2022 (offset -1000).")
+    st.caption("La reflectancia se calcula como (valor del pixel + offset) / escala, y debe quedar entre 0 y 1. Nota: GEE usa Escala 10000 (si exportó la colección armonizada S2_SR_HARMONIZED, el offset ya está corregido: use offset 0). Si su imagen es Sentinel-2 L2A descargada directamente de Copernicus (2022 en adelante), use el preset post-2022 (offset -1000).")
     
     sat_name = st.text_input("Nombre en gráficos:", sat_preset.split(" (")[0] if sat_preset not in ["Personalizado", "Google Earth Engine (Reflectancia 0-1)", "Google Earth Engine (Escala 10000)"] else "Satélite GEE")
     es_personalizado = (sat_preset == "Personalizado")
@@ -1011,7 +1246,7 @@ with st.sidebar:
     
     if tipo_datos == "1. Multiespectral (dron/satélite)":
         st.markdown("**4. Configuración de bandas (índice)**")
-        st.caption("Si una banda no existe, ingrese 0.")
+        st.caption("Ingrese el número de banda (comenzando en 1) según el orden en que está guardada en su TIF. Si el sensor no tiene una banda, ingrese 0: los índices que dependan de ella no se calcularán.")
         c1, c2 = st.columns(2)
         with c1: 
             st.markdown("**Uas (dron)**")
@@ -1034,7 +1269,7 @@ with st.sidebar:
             s_swir2 = st.number_input("S-swir 2", min_value=0, value=7, step=1)
             bandas_config['sat'] = [s_b, s_g, s_r, s_re, s_n, s_swir1, s_swir2]
     else:
-        st.info("Para datos hiperespectrales puros, la plataforma leerá las bandas automáticamente. El visor espacial operará en modo exploración (banda a banda).")
+        st.info("Para datos hiperespectrales puros, la plataforma leerá las bandas automáticamente. Si el TIF trae la longitud de onda en la descripción de cada banda (ej. 'B450'), se usará como eje X de las firmas; si no, se usará el número de banda. El visor espacial operará en modo exploración (banda a banda).")
 
     if st.button("Ejecutar plataforma", type="primary", use_container_width=True):
         if archivos_escenas[0]['uas'] is None and archivos_escenas[0]['sat'] is None:
@@ -1052,6 +1287,13 @@ with st.sidebar:
                         st.session_state.master_gdf = raw_gdf
                         st.session_state.data_escenas = {}
                         st.session_state.bandas_config = bandas_config
+                        # Limpiar resultados de corridas anteriores y congelar los parámetros de esta corrida
+                        for k_old in ['df_global_all_f', 'df_global_all_c', 'df_global_all_i', 'global_buffers',
+                                      'scene_color_map', 'color_map', 'zip_bytes', 'zip_n', 'zip_nombre']:
+                            st.session_state.pop(k_old, None)
+                        st.session_state.params_run = {
+                            'sat_scale': sat_scale, 'sat_offset': sat_offset, 'uas_scale': uas_scale, 'uas_offset': uas_offset,
+                            'col_clase': st.session_state.get('col_clase'), 'has_vector': bool(st.session_state.get('has_vector'))}
                         
                         tipo_simplificado = "Multiespectral (dron/satélite)" if tipo_datos == "1. Multiespectral (dron/satélite)" else "Hiperespectral"
                         st.session_state.tipo_datos = tipo_simplificado
@@ -1075,33 +1317,23 @@ with st.sidebar:
 # 5. Renderizado progresivo
 # -----------------------------
 if st.session_state.get("analisis_listo"):
-    has_vector = st.session_state.get('has_vector', False)
-    col_clase_input = st.session_state.get('col_clase', None)
+    # Se usan los parámetros congelados al presionar "Ejecutar plataforma" (cambiar el panel lateral no altera resultados ya calculados)
+    _p = st.session_state.get('params_run', {})
+    has_vector = _p.get('has_vector', st.session_state.get('has_vector', False))
+    col_clase_input = _p.get('col_clase', st.session_state.get('col_clase', None))
+    if _p: sat_scale, sat_offset, uas_scale, uas_offset = _p['sat_scale'], _p['sat_offset'], _p['uas_scale'], _p['uas_offset']
     names = list(st.session_state.data_escenas.keys())
     tipo_datos_sesion = st.session_state.get('tipo_datos', "Multiespectral (dron/satélite)")
     sat_name_sesion = st.session_state.get('sat_name', "Satélite")
     
     tab_titles = [f"Resultados {n}" for n in names]
     if has_vector and len(names) > 0: tab_titles.append("Comparación global")
+    zip_box = st.container()
     tabs = st.tabs(tab_titles)
     
-    # Creamos un color de campaña único incluso para las pestañas individuales para mantener la coherencia total
-    if 'scene_color_map' not in st.session_state:
-        st.session_state.scene_color_map = {}
-        july_count = 0
-        for n in names:
-            if "2024-11" in n:
-                st.session_state.scene_color_map[n] = "#D62728"
-            elif "2025-04" in n or "2025-05" in n:
-                st.session_state.scene_color_map[n] = "#2CA02C"
-            elif "2025-07" in n:
-                july_count += 1
-                st.session_state.scene_color_map[n] = "#87CEEB" if july_count == 1 else "#08306B"
-            elif "2025-11" in n:
-                st.session_state.scene_color_map[n] = "#C875C4"
-            else:
-                st.session_state.scene_color_map[n] = "#7F7F7F"
-    
+    # Un color único por escena, recalculado en cada ejecución según las escenas cargadas
+    st.session_state.scene_color_map = asignar_colores_escenas(names)
+
     if has_vector and 'color_map' not in st.session_state:
         unique_classes = st.session_state.master_gdf[col_clase_input].unique()
         palette = (px.colors.qualitative.Alphabet + px.colors.qualitative.Dark24 + px.colors.qualitative.Light24) * 5 
@@ -1344,6 +1576,8 @@ if st.session_state.get("analisis_listo"):
                                                 st.write(" "); st.write(" ")
                                                 if idx_sel in d['idx_scat_buffers']:
                                                     custom_download_button(d['idx_scat_buffers'][idx_sel], f"Dispersion_{idx_sel}_{name}.png")
+                                            st.markdown("**Métricas de ajuste por cobertura**")
+                                            mostrar_tabla_metricas(df_c_idx_filt, 'Cobertura')
                                         else: st.info("No hay suficientes datos superpuestos para generar la regresión de este índice.")
                         else: st.info("No se han registrado índices para el cálculo.")
                     tab_idx += 1
@@ -1410,6 +1644,9 @@ if st.session_state.get("analisis_listo"):
                                     st.write(" "); st.write(" ")
                                     buf_glob_scat = export_formal_scatter(df_corr_filt, f"Regresión radiométrica global ({name})", r2_glob, color_col='Cobertura', color_map=st.session_state.color_map)
                                     custom_download_button(buf_glob_scat, f"Regresion_Global_Escena_{name}.png")
+
+                                st.markdown("---")
+                                mostrar_metricas_ajuste(df_corr_filt)
 
                                 st.markdown("---")
                                 st.markdown("**Regresiones lineales por cobertura**")
@@ -1572,6 +1809,8 @@ if st.session_state.get("analisis_listo"):
                                     if 'buf_glob_bar_r2' in glob_buf:
                                         custom_download_button(glob_buf['buf_glob_bar_r2'], "R2_Global_Barplot.png")
 
+                            mostrar_metricas_globales(all_c_filt)
+                            st.markdown("---")
                             st.markdown("### Regresiones consolidadas globales por cobertura")
                             cols = st.columns(3)
                             for i, c in enumerate(cobs):
@@ -1652,25 +1891,68 @@ if st.session_state.get("analisis_listo"):
                 with col_c1: custom_download_button(all_f.to_csv(index=False).encode('utf-8'), "firmas_globales.csv", text="Descargar firmas globales (CSV)", mime="text/csv")
                 if tipo_datos_sesion == "Multiespectral (dron/satélite)" and all_c is not None:
                     with col_c2: custom_download_button(all_c.to_csv(index=False).encode('utf-8'), "correlaciones_globales.csv", text="Descargar correlaciones globales (CSV)", mime="text/csv")
+    with zip_box:
+        panel_descarga_zip()
 else:
     # --- Pantalla de inicio ---
     st.markdown("### Plataforma de Validación Espectral y Multitemporal")
-    st.markdown("Esta herramienta computacional ha sido desarrollada como solución metodológica para la validación y calibración cruzada de datos espaciales. Ante la incertidumbre en la fiabilidad de las imágenes capturadas por sensores montados en VANTs (drones comerciales como MicaSense o Sentera), esta plataforma utiliza la rigurosidad radiométrica de plataformas satelitales (como Sentinel-2) como 'verdad espacial' para confirmar la integridad de los datos.")
+    st.markdown("Esta herramienta permite validar y calibrar de forma cruzada datos espaciales. Ante la incertidumbre sobre la fiabilidad radiométrica de las imágenes capturadas por sensores montados en VANTs (drones comerciales como MicaSense o Sentera), la plataforma toma la radiometría de un sensor satelital (por ejemplo Sentinel-2) como referencia ('verdad espacial') y cuantifica qué tan bien coinciden ambos sensores sobre las mismas coberturas, en una o varias fechas.")
     st.markdown("---")
     col1, col2 = st.columns(2)
-    with col1: 
-        st.info("**1. Multiespectral (dron vs satélite)**\n\nEl flujo de trabajo principal. Ideal para extraer índices ecosistémicos (NDVI, MNDWI, SAVI) y generar modelos de regresión lineal ($R^2$) que certifiquen la correspondencia entre el vuelo del dron y la escena satelital.")
-    with col2: 
-        st.success("**2. Hiperespectral puro**\n\nDesbloquea el análisis de datos masivos. Omite la creación de índices básicos y se enfoca en entregar el espectro electromagnético continuo mediante un explorador de barrido espacial.")
+    with col1:
+        st.info("**1. Multiespectral (dron vs satélite)**\n\nEl flujo de trabajo principal. Extrae firmas espectrales por cobertura, calcula índices (NDVI, NDWI, MNDWI, NDMI y SAVI) y ajusta modelos de regresión lineal ($R^2$) entre el dron y el satélite para evaluar su correspondencia radiométrica.")
+    with col2:
+        st.success("**2. Hiperespectral**\n\nPara imágenes con cientos de bandas. No calcula índices ni regresiones: entrega la firma espectral continua de cada cobertura y un explorador que permite barrer el espectro banda a banda sobre el mapa.")
     st.markdown("---")
-    
-    st.markdown("#### Guía Metodológica de Uso")
+
+    st.markdown("#### Cómo funciona la plataforma")
     st.markdown("""
-    * **1. Preparación Vectorial:** Para operar la estadística automatizada, cargue un archivo vectorial (`.zip` con shapefile o `.gpkg`) que contenga un atributo de texto identificando las coberturas (ej. agua, vegetación, suelo).
-    * **2. Ajuste Radiométrico:** Al trabajar con Sentinel-2 extraído de Google Earth Engine, recuerde que el offset suele ser 0 y la escala 10000. Configure correctamente la escala y offset de la ortofoto de su dron para que ambos sensores grafiquen entre 0 y 1.
-    * **3. Configuración de Bandas:** Asigne el número de banda correcto según su sensor (MicaSense, Sentera, etc.). Si su sensor no posee una banda específica (ej. SWIR), ingrese **0**.
-    * **4. Interpretación de Resultados:** La plataforma generará automáticamente firmas espectrales comparativas y gráficos de dispersión. Un $R^2$ cercano a 1.0 valida la fiabilidad radiométrica de la captura del dron respecto al satélite.
-    * **5. Descarga de Informes:** Todos los gráficos poseen un botón estandarizado para descargar la imagen en alta resolución (PNG), lista para anexar a sus reportes y documentos.
+    Todo se configura en el **panel lateral**, de arriba hacia abajo:
+
+    1. **Modalidad de análisis:** elija *Multiespectral (dron/satélite)* o *Hiperespectral*.
+    2. **Archivo vectorial (opcional):** cargue un `.zip` con el shapefile completo (`.shp`, `.shx`, `.dbf`, `.prj`) o un `.gpkg`, y seleccione la columna que identifica la cobertura de cada polígono. **Con vector** se activa el modo completo (firmas, índices, regresiones y comparación global). **Sin vector** la plataforma opera solo como visor espacial.
+    3. **Escenas:** indique cuántas escenas (fechas o campañas) analizará, hasta 10, y cargue en cada una el GeoTIFF del dron y/o del satélite (en hiperespectral, solo la imagen hiperespectral). Se recomienda nombrar los archivos `AAAA-MM-DD_Lugar_...tif`: de ahí se obtiene el título de cada escena, por ejemplo *Laguna Verde (2025-07-15)*.
+    4. **Ajustes radiométricos:** seleccione el preset del satélite o use *Personalizado*, e ingrese la escala y el offset del dron. La reflectancia se calcula como `(valor + offset) / escala` y ambos sensores deben quedar entre 0 y 1.
+    5. **Configuración de bandas** (solo multiespectral): indique el número de banda (desde 1) de cada color en el dron y en el satélite. Si el sensor no posee una banda (ej. SWIR), ingrese **0**.
+    6. **Ejecutar plataforma:** la plataforma valida los archivos y prepara las escenas. Los resultados se procesan al abrir cada pestaña. Use **Reiniciar entorno** para empezar de nuevo.
     """)
 
-    
+    st.markdown("#### Qué hace internamente")
+    st.markdown("""
+    * **Sistema de coordenadas:** el primer archivo de la escena 1 define el sistema del proyecto y debe ser **proyectado en metros** (ej. UTM). Si está en grados geográficos, la plataforma se detiene. Los demás rasters y el vector se reproyectan automáticamente a ese sistema.
+    * **Área común:** cada escena se recorta a la zona donde se superponen el dron, el satélite y el vector. Si no hay superposición, se informa un error.
+    * **Remuestreo:** el dron se remuestrea a 2 m para el visor espacial y a la resolución del satélite (ej. 10 m) para compararlos en igualdad de condiciones. También se conserva su resolución nativa.
+    * **Muestreo:** en cada cobertura se sortean hasta 100 puntos aleatorios dentro de sus polígonos, ponderados por área. El sorteo usa una semilla fija, por lo que los resultados son reproducibles. Los píxeles sin dato se descartan.
+    * **Firmas e índices:** se promedia la reflectancia de los puntos por banda y cobertura, y se calculan NDVI, NDWI, MNDWI, NDMI y SAVI (cada índice se calcula solo si el sensor tiene las bandas necesarias).
+    * **Ajuste radiométrico:** se ajusta una regresión lineal Satélite = a + b · Dron sobre los puntos válidos en ambos sensores, por cobertura, por banda y global, y se reporta el $R^2$ junto con la pendiente, el intercepto, el sesgo, el MAE y el RMSE (error directo entre sensores). Se muestra también la línea 1:1.
+    """)
+
+    st.markdown("#### Qué encontrará en los resultados")
+    st.markdown("""
+    Cada escena tiene su pestaña con estas secciones:
+
+    * **Visor espacial:** mapa interactivo con los límites de cada sensor y las coberturas, gráfico de superficie por cobertura (ha), y mapas en color real, falso color, índices y banda individual (en hiperespectral, un deslizador para recorrer las bandas).
+    * **Firmas espectrales:** curvas de reflectancia del dron y del satélite, generales y por cobertura.
+    * **Estadística de índices** (multiespectral): distribución de cada índice por cobertura y sensor, y su dispersión dron vs satélite.
+    * **Ajuste radiométrico** (multiespectral): $R^2$ por cobertura, regresión global, regresiones por cobertura y por banda, y una tabla de métricas de error (pendiente, intercepto, sesgo, MAE y RMSE). Puede filtrar las bandas que entran al cálculo.
+    * **Comparación global:** con vector cargado, aparece una pestaña final que compara todas las escenas: evolución de las firmas, resumen de $R^2$ y evolución temporal de los índices.
+
+    Todos los gráficos se pueden descargar en PNG de alta resolución, y las tablas numéricas en CSV desde los *Centros de descargas*. Además, el botón **Descargar todos los resultados (ZIP)**, en la parte superior de los resultados, reúne todo en un solo archivo ordenado por carpetas.
+    """)
+
+    with st.expander("Cómo interpretar los resultados", expanded=False):
+        st.markdown("""
+        * Un $R^2$ cercano a 1.0 indica que el dron y el satélite varían de forma muy parecida. Revise también la **línea 1:1**, la **pendiente**, el **sesgo** y el **RMSE**: un $R^2$ alto no detecta por sí solo un desfase o una diferencia de escala sistemática entre sensores.
+        * El $R^2$ global y por cobertura agrupa todas las bandas, y las diferencias naturales entre bandas (ej. NIR vs azul) lo elevan. Para evaluar al dron, priorice las métricas **por banda**.
+        * El píxel satelital (ej. 10 m) mezcla varias superficies, mientras que el dron las distingue. En coberturas heterogéneas es normal un $R^2$ menor y curvas satelitales más aplanadas (efecto de escala o píxel mixto).
+        * Las regresiones requieren más de 2 puntos válidos por grupo. Si una cobertura es muy pequeña o queda fuera de la imagen, puede no aparecer.
+        """)
+
+    with st.expander("Requisitos y recomendaciones", expanded=False):
+        st.markdown("""
+        * **Formato:** rasters en GeoTIFF (`.tif`) y vectores en `.zip` (shapefile) o `.gpkg`.
+        * **Conexión a internet:** los mapas base (Google Satélite, OpenStreetMap y CartoDB) se descargan en línea. Sin conexión, el análisis funciona pero los mapas de contexto pueden aparecer sin fondo.
+        * **Tamaño de archivos:** el límite de carga se define en `.streamlit/config.toml` (`server.maxUploadSize`, en MB).
+        * **Colores de campaña:** en los gráficos comparativos cada escena recibe un color distinto, asignado automáticamente.
+        * **Consistencia entre escenas:** use las mismas bandas y la misma configuración radiométrica en todas las escenas de un proyecto.
+        """)
