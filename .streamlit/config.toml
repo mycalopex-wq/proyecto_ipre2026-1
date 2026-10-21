@@ -1,3 +1,5 @@
-server.maxUploadSize = 2000
+[server]
+maxUploadSize = 1000
+
 [theme]
 font = "calibri"
