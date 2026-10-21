@@ -18,7 +18,7 @@ Los drones comerciales con sensores multiespectrales (MicaSense, Sentera, etc.) 
 ## Requisitos
 
 - Python **3.10 o superior** (Linux o Windows)
-- Conexión a internet para los mapas base (Google Satélite, OpenStreetMap y CartoDB)
+- Conexión a internet para los mapas base (Google Satélite, OpenStreetMap y Esri)
 
 Las dependencias están en `requirements.txt`. Las versiones mínimas fueron probadas, y también las versiones más recientes disponibles a octubre de 2026.
 
@@ -110,7 +110,7 @@ Todo se configura en el panel lateral, de arriba hacia abajo:
 | Dato | Formato | Notas |
 |---|---|---|
 | Imágenes de dron y satélite | GeoTIFF (`.tif`) | Deben estar en un sistema **proyectado en metros** (ej. UTM). Se reproyectan automáticamente al sistema del primer archivo. |
-| Cobertura (opcional) | `.zip` (shapefile) o `.gpkg` | Un atributo debe identificar la cobertura de cada polígono. |
+| Cobertura (opcional) | `.zip` (shapefile) o `.gpkg` | Un atributo debe identificar la cobertura de cada polígono. Si el `.gpkg` tiene varias capas, la app permite elegir cuál usar. |
 | Imagen hiperespectral | GeoTIFF multibanda | Si cada banda tiene una descripción con la longitud de onda (ej. `B450`), se usa como eje X. |
 
 **Nombre de los archivos:** se recomienda `AAAA-MM-DD_Lugar_...tif`, por ejemplo `2025-07-15_Laguna-Verde_dron.tif`. De ahí se obtiene el título de la escena (*Laguna Verde (2025-07-15)*). Si el nombre no sigue este formato, se usa el nombre del archivo sin extensión.
@@ -220,7 +220,7 @@ resultados_AAAAMMDD_HHMM.zip
 
 - **Configuración compartida:** la escala, el offset y la configuración de bandas son únicos para todas las escenas del proyecto. Se congelan al presionar *Ejecutar plataforma*: para aplicar cambios del panel lateral hay que volver a ejecutar.
 - **Hiperespectral sin descripciones de banda:** si el TIF no trae descripciones, las bandas se llaman `Banda_N` y el eje X muestra el número de banda, aunque el título diga "nm".
-- **Mapas base en línea:** sin internet, el análisis funciona, pero los mapas de contexto pueden quedar sin fondo.
+- **Mapas base en línea:** los mapas de contexto regional y país descargan su fondo de Esri (con respaldo en OpenStreetMap) una sola vez por escena. Sin internet, el análisis funciona, pero esos mapas muestran el aviso "Mapa base no disponible".
 
 ## Solución de problemas
 
