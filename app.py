@@ -88,9 +88,20 @@ def process_vector_file(uploaded_file):
     return None
 
 @st.cache_data
-def load_vector_preview(vector_file):
+def listar_capas_vector(vector_file):
+    """Nombres de las capas con geometría del archivo vectorial (un .gpkg puede traer varias)."""
     path = process_vector_file(vector_file)
-    return gpd.read_file(path)
+    if path is None: return []
+    try:
+        import pyogrio
+        return [str(nombre) for nombre, geom in pyogrio.list_layers(path) if geom is not None]
+    except Exception:
+        return []
+
+@st.cache_data
+def load_vector_preview(vector_file, capa=None):
+    path = process_vector_file(vector_file)
+    return gpd.read_file(path, layer=capa) if capa else gpd.read_file(path)
 
 def calcular_regresion_limpia(df_sub):
     X = df_sub[['Uas']] 
@@ -200,6 +211,39 @@ def add_cartographic_elements(ax, crs_is_metric, title):
         ax.add_artist(scalebar)
     ax.text(0.05, 0.95, 'N\n↑', transform=ax.transAxes, color='black', fontsize=16, ha='center', va='center', weight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=2))
 
+_PROVEEDORES_REGIONAL = ["Esri.WorldTopoMap", "Esri.WorldStreetMap", "OpenStreetMap.Mapnik"]
+_PROVEEDORES_PAIS = ["Esri.WorldGrayCanvas", "Esri.WorldStreetMap"]
+_BASEMAP_FALLIDOS = {}   # (proveedor, límites) -> momento del fallo; evita reintentar en cada mapa
+
+def _proveedor_cx(nombre):
+    p = cx.providers
+    for parte in nombre.split("."): p = p[parte]
+    return p
+
+@st.cache_data(show_spinner=False)
+def _descargar_basemap(proveedor, w, s_, e, n):
+    """Descarga los tiles una sola vez y los guarda en caché: los 14 mapas de una escena reutilizan la misma imagen.
+    Si falla lanza una excepción (Streamlit no guarda en caché los errores)."""
+    img, extent = cx.bounds2img(w, s_, e, n, source=_proveedor_cx(proveedor), ll=False)
+    return img, extent
+
+def _agregar_basemap(ax, centro, mitad, proveedores, alpha):
+    import time
+    w, e = round(centro[0] - mitad, -2), round(centro[0] + mitad, -2)
+    s_, n = round(centro[1] - mitad, -2), round(centro[1] + mitad, -2)
+    for prov in proveedores:
+        clave = (prov, w, s_, e, n)
+        if time.time() - _BASEMAP_FALLIDOS.get(clave, 0) < 300: continue
+        try:
+            img, extent = _descargar_basemap(prov, w, s_, e, n)
+            ax.imshow(img, extent=extent, alpha=alpha, zorder=0, interpolation='bilinear')
+            ax.set_xlim(w, e); ax.set_ylim(s_, n)
+            return True
+        except Exception:
+            _BASEMAP_FALLIDOS[clave] = time.time()
+    ax.text(0.5, 0.1, "Mapa base no disponible\n(sin conexión)", transform=ax.transAxes, ha='center', va='center', fontsize=8, color='gray')
+    return False
+
 def create_context_maps(ax_regional, ax_national, main_gdf, raster_bounds=None, raster_crs=None):
     if main_gdf is not None and not main_gdf.empty: gdf_wm = main_gdf.to_crs(epsg=3857)
     elif raster_bounds is not None and raster_crs is not None:
@@ -209,23 +253,19 @@ def create_context_maps(ax_regional, ax_national, main_gdf, raster_bounds=None, 
     else: return
 
     gdf_wm.plot(ax=ax_regional, facecolor='none', edgecolor='red', linewidth=2)
-    try:
-        minx, miny, maxx, maxy = gdf_wm.total_bounds
-        cx_coord, cy_coord = (minx + maxx) / 2, (miny + maxy) / 2
-        buffer_reg = 15000
-        ax_regional.set_xlim(cx_coord - buffer_reg, cx_coord + buffer_reg)
-        ax_regional.set_ylim(cy_coord - buffer_reg, cy_coord + buffer_reg)
-        cx.add_basemap(ax_regional, source=cx.providers.OpenStreetMap.Mapnik, alpha=0.7)
-    except Exception: pass
+    minx, miny, maxx, maxy = gdf_wm.total_bounds
+    cx_coord, cy_coord = (minx + maxx) / 2, (miny + maxy) / 2
+    buffer_reg = 15000
+    ax_regional.set_xlim(cx_coord - buffer_reg, cx_coord + buffer_reg)
+    ax_regional.set_ylim(cy_coord - buffer_reg, cy_coord + buffer_reg)
+    _agregar_basemap(ax_regional, (cx_coord, cy_coord), buffer_reg, _PROVEEDORES_REGIONAL, 0.85)
 
     centroid = gdf_wm.centroid
     centroid.plot(ax=ax_national, color='red', marker='*', markersize=250, edgecolor='black', linewidth=1.5, zorder=5)
-    try:
-        buffer_nat = 800000
-        ax_national.set_xlim(cx_coord - buffer_nat, cx_coord + buffer_nat)
-        ax_national.set_ylim(cy_coord - buffer_nat, cy_coord + buffer_nat)
-        cx.add_basemap(ax_national, source=cx.providers.CartoDB.Positron, alpha=0.9)
-    except Exception: pass
+    buffer_nat = 800000
+    ax_national.set_xlim(cx_coord - buffer_nat, cx_coord + buffer_nat)
+    ax_national.set_ylim(cy_coord - buffer_nat, cy_coord + buffer_nat)
+    _agregar_basemap(ax_national, (cx_coord, cy_coord), buffer_nat, _PROVEEDORES_PAIS, 0.9)
 
     for ax_map, title in zip([ax_regional, ax_national], ["Contexto regional", "Contexto país"]):
         ax_map.set_xticks([])
@@ -1114,7 +1154,7 @@ def construir_zip(data_escenas, tipo_datos, sat_name, bandas_config, params, col
 
     # Archivo explicativo
     ahora = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    leeme = f"""RESULTADOS - Plataforma de Validación Espectral y Multitemporal
+    readme = f"""RESULTADOS - Plataforma de Validación Espectral y Multitemporal
 Generado: {ahora}
 
 PARÁMETROS DE LA CORRIDA
@@ -1125,6 +1165,7 @@ Escala / offset dron: {params['uas_scale']} / {params['uas_offset']}
 Reflectancia = (valor del pixel + offset) / escala
 Bandas dron (nº desde 1; 0 = no existe) [azul, verde, rojo, red edge, nir, swir1, swir2]: {bandas_config.get('uas')}
 Bandas satélite: {bandas_config.get('sat')}
+Capa vectorial: {params.get('capa') or '(única)'}
 Escenas: {', '.join(names)}
 
 ESTRUCTURA
@@ -1145,7 +1186,7 @@ El R² global y por cobertura agrupa todas las bandas y suele quedar elevado; pa
 
 Archivos incluidos: {len(contenido)}
 """
-    add("LEEME.txt", leeme.encode('utf-8'))
+    add("README.txt", readme.encode('utf-8'))
     z.close()
     return buf.getvalue(), len(contenido)
 
@@ -1183,15 +1224,20 @@ with st.sidebar:
     tipo_datos = st.selectbox("Modalidad de análisis", ["1. Multiespectral (dron/satélite)", "2. Hiperespectral"])
     
     with st.expander("1. Archivo vectorial (opcional)", expanded=False):
-        st.caption("Suba un .zip con el shapefile completo (.shp, .shx, .dbf y .prj) o un .gpkg. Cada polígono debe tener un atributo que identifique su cobertura (ej. agua, vegetación, suelo). Sin vector, la plataforma funciona solo como visor espacial.")
+        st.caption("Suba un .zip con el shapefile completo (.shp, .shx, .dbf y .prj) o un .gpkg (si trae varias capas, podrá elegir cuál usar). Cada polígono debe tener un atributo que identifique su cobertura (ej. agua, vegetación, suelo). Sin vector, la plataforma funciona solo como visor espacial.")
         vector_file = st.file_uploader("Archivo vectorial", type=["zip", "gpkg", "GPKG"])
+        st.session_state.capa_vector = None
         if vector_file:
-            preview_gdf = load_vector_preview(vector_file)
+            capas = listar_capas_vector(vector_file)
+            if len(capas) > 1:
+                st.session_state.capa_vector = st.selectbox("Capa del archivo:", capas, key='selector_capa')
+                st.caption(f"El archivo tiene {len(capas)} capas. Elija la que contiene las coberturas a analizar.")
+            preview_gdf = load_vector_preview(vector_file, st.session_state.capa_vector)
             st.session_state.raw_gdf = preview_gdf
             st.session_state.has_vector = True
             resumen_columnas = [{"Columna": c, "Ejemplos": ", ".join(map(str, preview_gdf[c].dropna().unique()[:3]))} for c in preview_gdf.columns if c != 'geometry']
             st.dataframe(pd.DataFrame(resumen_columnas), hide_index=True)
-            st.session_state.col_clase = st.selectbox("Columna clase:", [c for c in preview_gdf.columns if c != 'geometry'], key='selector_clase')
+            st.session_state.col_clase = st.selectbox("Columna clase:", [c for c in preview_gdf.columns if c != 'geometry'], key=f'selector_clase_{st.session_state.capa_vector}')
         else:
             st.session_state.has_vector = False
 
@@ -1293,7 +1339,7 @@ with st.sidebar:
                             st.session_state.pop(k_old, None)
                         st.session_state.params_run = {
                             'sat_scale': sat_scale, 'sat_offset': sat_offset, 'uas_scale': uas_scale, 'uas_offset': uas_offset,
-                            'col_clase': st.session_state.get('col_clase'), 'has_vector': bool(st.session_state.get('has_vector'))}
+                            'col_clase': st.session_state.get('col_clase'), 'capa': st.session_state.get('capa_vector'), 'has_vector': bool(st.session_state.get('has_vector'))}
                         
                         tipo_simplificado = "Multiespectral (dron/satélite)" if tipo_datos == "1. Multiespectral (dron/satélite)" else "Hiperespectral"
                         st.session_state.tipo_datos = tipo_simplificado
@@ -1479,22 +1525,29 @@ if st.session_state.get("analisis_listo"):
                     cobs = d['df_firmas']['Cobertura'].unique()
                     st.markdown("### Firmas espectrales generales")
                     if tipo_datos_sesion == "Multiespectral (dron/satélite)":
-                        col_gen1, col_gen2 = st.columns(2)
-                        with col_gen1:
-                            if d.get('fig_gen_uas') is not None:
-                                st.plotly_chart(d['fig_gen_uas'], width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_uas_{name}")
-                                custom_download_button(d['buf_gen_uas'], f"Firmas_UAS_{name}.png")
-                        
-                        with col_gen2:
-                            if d.get('fig_gen_sat') is not None:
-                                sat_tabs = st.tabs(["Satélite Completo (hasta SWIR)", "Satélite Recortado (hasta NIR)"])
-                                with sat_tabs[0]:
-                                    st.plotly_chart(d['fig_gen_sat'], width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_sat_full_{name}")
-                                    custom_download_button(d['buf_gen_sat'], f"Firmas_{sat_name_sesion}_Completa_{name}.png")
-                                with sat_tabs[1]:
-                                    if d.get('fig_gen_sat_nir') is not None:
-                                        st.plotly_chart(d['fig_gen_sat_nir'], width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_sat_nir_{name}")
-                                        custom_download_button(d['buf_gen_sat_nir'], f"Firmas_{sat_name_sesion}_NIR_{name}.png")
+                        # Las pestañas van arriba de la fila: dron y satélite quedan siempre a la misma altura
+                        def _fila_firmas(fig_sat, buf_sat, archivo_sat, clave):
+                            c_uas, c_sat = st.columns(2)
+                            with c_uas:
+                                if d.get('fig_gen_uas') is not None:
+                                    st.plotly_chart(d['fig_gen_uas'], width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_uas_{clave}_{name}")
+                                    custom_download_button(d['buf_gen_uas'], f"Firmas_UAS_{name}.png")
+                            with c_sat:
+                                if fig_sat is not None:
+                                    st.plotly_chart(fig_sat, width="stretch", config={'toImageButtonOptions': {'format': 'png'}}, key=f"line_sat_{clave}_{name}")
+                                    custom_download_button(buf_sat, archivo_sat)
+
+                        if d.get('fig_gen_sat') is not None:
+                            vistas = st.tabs(["Satélite completo (hasta SWIR)", "Satélite recortado (hasta NIR)"])
+                            with vistas[0]:
+                                _fila_firmas(d['fig_gen_sat'], d['buf_gen_sat'], f"Firmas_{sat_name_sesion}_Completa_{name}.png", "full")
+                            with vistas[1]:
+                                if d.get('fig_gen_sat_nir') is not None:
+                                    _fila_firmas(d['fig_gen_sat_nir'], d['buf_gen_sat_nir'], f"Firmas_{sat_name_sesion}_NIR_{name}.png", "nir")
+                                else:
+                                    st.info("No hay una versión recortada hasta NIR para este satélite.")
+                        else:
+                            _fila_firmas(None, None, "", "solo")
                     else:
                         if d.get('fig_gen_hs') is not None:
                             col_vacia1, col_centro, col_vacia2 = st.columns([1, 6, 1])
@@ -1951,7 +2004,7 @@ else:
     with st.expander("Requisitos y recomendaciones", expanded=False):
         st.markdown("""
         * **Formato:** rasters en GeoTIFF (`.tif`) y vectores en `.zip` (shapefile) o `.gpkg`.
-        * **Conexión a internet:** los mapas base (Google Satélite, OpenStreetMap y CartoDB) se descargan en línea. Sin conexión, el análisis funciona pero los mapas de contexto pueden aparecer sin fondo.
+        * **Conexión a internet:** los mapas base (Google Satélite, OpenStreetMap y Esri) se descargan en línea. Sin conexión, el análisis funciona pero los mapas de contexto pueden aparecer sin fondo.
         * **Tamaño de archivos:** el límite de carga se define en `.streamlit/config.toml` (`server.maxUploadSize`, en MB).
         * **Colores de campaña:** en los gráficos comparativos cada escena recibe un color distinto, asignado automáticamente.
         * **Consistencia entre escenas:** use las mismas bandas y la misma configuración radiométrica en todas las escenas de un proyecto.
