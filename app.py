@@ -12,14 +12,16 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 from scipy import stats
 from rasterio.warp import calculate_default_transform, reproject, Resampling
-from rasterio.transform import from_bounds
+from rasterio.transform import from_bounds, Affine
+from rasterio.features import shapes as rio_shapes
 import rasterio.windows
 import folium
 from streamlit_folium import st_folium
 import plotly.express as px
 import plotly.graph_objects as go
 import random
-from shapely.geometry import Point, box
+from shapely.geometry import Point, box, shape as shapely_shape
+from shapely.ops import unary_union
 import matplotlib.pyplot as plt
 from matplotlib_scalebar.scalebar import ScaleBar
 import contextily as cx
@@ -241,9 +243,67 @@ def resample_raster(in_path, target_res=2.0):
             for i in range(1, src.count + 1):
                 reproject(source=rasterio.band(src, i), destination=rasterio.band(dst, i),
                           src_transform=src.transform, src_crs=src.crs, dst_transform=new_transform, dst_crs=src.crs,
-                          resampling=Resampling.bilinear)
+                          resampling=Resampling.average,
+                          src_nodata=src.nodata, dst_nodata=src.nodata)
             dst.descriptions = src.descriptions
     return out_path
+
+def huella_datos(path, max_px=2000):
+    """Polígono (en el CRS del raster) donde el raster tiene datos válidos.
+    Usa nodata o banda alfa si existen; si no, considera vacíos los píxeles que valen 0 en todas las bandas."""
+    with rasterio.open(path) as src:
+        k = max(1, int(max(src.width, src.height) / max_px))
+        h, w = max(1, src.height // k), max(1, src.width // k)
+        m = src.dataset_mask(out_shape=(h, w))  # 255 = válido
+        if src.nodata is None and m.min() == 255:
+            # Sin nodata ni alfa: se infiere con las primeras bandas (evita cargar cientos de bandas)
+            idx = list(range(1, min(src.count, 3) + 1))
+            datos = src.read(idx, out_shape=(len(idx), h, w), resampling=Resampling.nearest)
+            m = ((datos != 0).any(axis=0) * 255).astype("uint8")
+        tr = src.transform * Affine.scale(src.width / w, src.height / h)
+        geoms = [shapely_shape(g) for g, v in rio_shapes(m, mask=(m > 0), transform=tr) if v > 0]
+    if not geoms:
+        raise ValueError("El raster no tiene píxeles con datos válidos.")
+    return unary_union(geoms).buffer(0).simplify(abs(tr.a))
+
+def resample_to_grid(in_path, ref_path, metodo=Resampling.average):
+    """Remuestrea in_path exactamente sobre la grilla (transform, tamaño, CRS) de ref_path."""
+    with rasterio.open(in_path) as src, rasterio.open(ref_path) as ref:
+        kw = src.meta.copy()
+        kw.update(crs=ref.crs, transform=ref.transform, width=ref.width, height=ref.height,
+                  compress="lzw", tiled=True)
+        out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".tif").name
+        with rasterio.open(out_path, "w", **kw) as dst:
+            for i in range(1, src.count + 1):
+                reproject(source=rasterio.band(src, i), destination=rasterio.band(dst, i),
+                          src_transform=src.transform, src_crs=src.crs,
+                          dst_transform=ref.transform, dst_crs=ref.crs,
+                          resampling=metodo,
+                          src_nodata=src.nodata, dst_nodata=src.nodata)
+            dst.descriptions = src.descriptions
+    return out_path
+
+def elegir_remuestreo(uas_path, sat_path, tol=0.05):
+    """Decide cómo llevar el dron a la grilla del satélite según su resolución nativa."""
+    with rasterio.open(uas_path) as u, rasterio.open(sat_path) as s:
+        ru = (abs(u.transform.a) + abs(u.transform.e)) / 2
+        rs = (abs(s.transform.a) + abs(s.transform.e)) / 2
+        dx = ((u.transform.c - s.transform.c) / rs) % 1
+        dy = ((u.transform.f - s.transform.f) / rs) % 1
+        alineado = all(min(d, 1 - d) < 0.02 for d in (dx, dy))
+    ratio = ru / rs
+    if ratio < 1 - tol:
+        return (Resampling.average,
+                f"Dron a {ru:.3g} m, más fino que el satélite ({rs:.3g} m): se promedia a la grilla del satélite.")
+    if abs(ratio - 1) <= tol:
+        if alineado:
+            return (Resampling.nearest,
+                    f"El dron ya está a ~{rs:.3g} m y alineado con el satélite: se usa sin suavizar.")
+        return (Resampling.average,
+                f"El dron ya está a ~{rs:.3g} m pero desfasado respecto al satélite: se realinea a su grilla.")
+    return (Resampling.nearest,
+            f"Atención: el dron ({ru:.3g} m) es más grueso que el satélite ({rs:.3g} m). "
+            f"No hay detalle extra para comparar; interprete las métricas con cautela.")
 
 def add_cartographic_elements(ax, crs_is_metric, title):
     ax.set_title(title, pad=20, fontsize=14, color='black', weight='bold')
@@ -590,8 +650,9 @@ def inicializar_base(uas_file, sat_file, master_crs, master_gdf, col_clase, tipo
         t_uas.write(uas_file.getvalue()); t_uas.close()
         uas_path_temp = reproject_raster(t_uas.name, master_crs.to_string())
         with rasterio.open(uas_path_temp) as src:
-            uas_bound_orig = box(*src.bounds)
-            geometrias_interseccion.append(uas_bound_orig)
+            uas_bound_orig = box(*src.bounds)  # solo para dibujar el límite en el mapa
+        # El área común usa la huella real de datos del dron, no su rectángulo envolvente
+        geometrias_interseccion.append(huella_datos(uas_path_temp))
 
     if master_gdf is not None and not master_gdf.empty:
         geometrias_interseccion.append(box(*master_gdf.total_bounds))
@@ -608,9 +669,11 @@ def inicializar_base(uas_file, sat_file, master_crs, master_gdf, col_clase, tipo
 
     def recortar_a_caja(path, geom):
         with rasterio.open(path) as src:
-            out_image, out_transform = mask(src, [geom], crop=True)
+            nodata_val = src.nodata if src.nodata is not None else 0
+            out_image, out_transform = mask(src, [geom], crop=True, nodata=nodata_val)
             out_meta = src.meta.copy()
-            out_meta.update({"height": out_image.shape[1], "width": out_image.shape[2], "transform": out_transform})
+            out_meta.update({"height": out_image.shape[1], "width": out_image.shape[2],
+                             "transform": out_transform, "nodata": nodata_val})
             desc = src.descriptions
         out_p = tempfile.NamedTemporaryFile(delete=False, suffix=".tif").name
         with rasterio.open(out_p, "w", **out_meta) as dest:
@@ -629,9 +692,19 @@ def inicializar_base(uas_file, sat_file, master_crs, master_gdf, col_clase, tipo
         with rasterio.open(data['uas_path_raw']) as src_uas:
             data['uas_native_res'] = src_uas.transform[0]
 
+        data['aviso_resolucion'] = None
         if tipo_datos == "Multiespectral (dron/satélite)":
-            data['uas_path_1m'] = resample_raster(data['uas_path_raw'], target_res=2.0)
-            data['uas_path_10m'] = resample_raster(data['uas_path_raw'], target_res=sat_res_dinamica) 
+            # Visor espacial: solo se reduce si el dron es más fino que 2 m
+            data['uas_path_1m'] = (resample_raster(data['uas_path_raw'], target_res=2.0)
+                                   if data['uas_native_res'] < 2.0 else data['uas_path_raw'])
+            # Versión comparable con el satélite
+            if data['has_sat']:
+                metodo, aviso = elegir_remuestreo(data['uas_path_raw'], data['sat_clip_path'])
+                data['uas_path_10m'] = resample_to_grid(data['uas_path_raw'], data['sat_clip_path'], metodo)
+                data['aviso_resolucion'] = aviso
+            else:
+                data['uas_path_10m'] = (resample_raster(data['uas_path_raw'], target_res=sat_res_dinamica)
+                                        if data['uas_native_res'] < sat_res_dinamica else data['uas_path_raw'])
         else:
             data['uas_path_1m'] = data['uas_path_raw']
             data['uas_path_10m'] = data['uas_path_raw']
@@ -639,6 +712,11 @@ def inicializar_base(uas_file, sat_file, master_crs, master_gdf, col_clase, tipo
     if master_gdf is not None:
         gdf_cortado = gpd.clip(master_gdf, caja_comun)
         if not gdf_cortado.empty:
+            # --- LIMPIEZA DE GEOMETRÍAS MULTIPARTES Y GEOMETRYCOLLECTION ---
+            gdf_cortado = gdf_cortado.explode(index_parts=False)
+            gdf_cortado = gdf_cortado[gdf_cortado.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+            # -----------------------------------------------------------------
+
             if gdf_cortado.crs.is_geographic: gdf_area = gdf_cortado.to_crs(epsg=3857)
             else: gdf_area = gdf_cortado.copy()
             gdf_cortado['area_m2'] = gdf_area.geometry.area
@@ -650,6 +728,7 @@ def inicializar_base(uas_file, sat_file, master_crs, master_gdf, col_clase, tipo
         data['gdf'] = None; data['gdf_diss'] = None
 
     return data
+
 
 def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, uas_scale, uas_offset, bandas_config, sat_name):
     random.seed(42); np.random.seed(42)
@@ -1527,6 +1606,8 @@ if st.session_state.get("analisis_listo"):
 
                             folium.LayerControl().add_to(m)
                             st_folium(m, width=800, height=400, returned_objects=[], key=f"folium_{name}")
+                            if d.get('aviso_resolucion'):
+                                (st.warning if d['aviso_resolucion'].startswith("Atención") else st.info)(d['aviso_resolucion'])
 
                         with col_torta:
                             if has_vector and d.get('gdf') is not None and not d['gdf'].empty:
@@ -2022,8 +2103,8 @@ else:
     st.markdown("#### Qué hace internamente")
     st.markdown("""
     * **Sistema de coordenadas:** el primer archivo de la escena 1 define el sistema del proyecto y debe ser **proyectado en metros** (ej. UTM). Si está en grados geográficos, la plataforma se detiene. Los demás rasters y el vector se reproyectan automáticamente a ese sistema.
-    * **Área común:** cada escena se recorta a la zona donde se superponen el dron, el satélite y el vector. Si no hay superposición, se informa un error.
-    * **Remuestreo:** el dron se remuestrea a 2 m para el visor espacial y a la resolución del satélite (ej. 10 m) para compararlos en igualdad de condiciones. También se conserva su resolución nativa.
+    * **Área común:** cada escena se recorta a la zona donde se superponen la huella real de datos del dron (no su rectángulo envolvente), el satélite y el vector. Si no hay superposición, se informa un error.
+    * **Remuestreo:** se detecta la resolución nativa del dron. Para compararlo con el satélite se promedia (no se interpola) sobre la grilla exacta del satélite; si el dron ya está a esa resolución y alineado, se usa sin suavizar, y si es más grueso se avisa. Para el visor espacial se reduce a 2 m solo si el dron es más fino. También se conserva su resolución nativa.
     * **Muestreo:** en cada cobertura se sortean hasta 100 puntos aleatorios dentro de sus polígonos, ponderados por área. El sorteo usa una semilla fija, por lo que los resultados son reproducibles. Los píxeles sin dato se descartan.
     * **Firmas e índices:** se promedia la reflectancia de los puntos por banda y cobertura, y se calculan NDVI, NDWI, MNDWI, NDMI y SAVI (cada índice se calcula solo si el sensor tiene las bandas necesarias).
     * **Ajuste radiométrico:** se ajusta una regresión lineal Satélite = a + b · Dron sobre los puntos válidos en ambos sensores, por cobertura, por banda y global, y se reporta el $R^2$ junto con la pendiente, el intercepto, el sesgo, el PBIAS, el MAE, el RMSE, el NRMSE, el NSE y el KGE (error directo entre sensores, con el satélite como referencia), además de intervalos de confianza al 95% para la pendiente, el intercepto y el sesgo. Se muestra también la línea 1:1.
