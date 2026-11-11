@@ -10,6 +10,7 @@ import tempfile, zipfile, os, re, io
 import base64
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
+from scipy import stats
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.transform import from_bounds
 import rasterio.windows
@@ -111,19 +112,64 @@ def calcular_regresion_limpia(df_sub):
     r2 = r2_score(y, model.predict(X))
     return model, r2
 
+NIVEL_CONF = 0.95  # nivel de los intervalos de confianza
+
 def calcular_metricas(df_sub, x='Uas', y='Sat'):
-    """Métricas de concordancia Satélite (y) vs Dron (x).
+    """Métricas de concordancia Dron (x, simulado) vs Satélite (y, referencia).
     - Pendiente / intercepto / R²: de la regresión Sat = a + b·Uas.
-    - Sesgo, MAE y RMSE: error directo Sat - Uas (contra la línea 1:1)."""
+    - Sesgo, MAE y RMSE: error directo Sat - Uas (contra la línea 1:1).
+    - PBIAS (%): 100·Σ(Sat - Uas)/ΣSat. Positivo = el dron subestima; mismo signo que el Sesgo.
+    - NRMSE (%): RMSE / rango del satélite (estable cuando la media es cercana a 0, p. ej. NDWI).
+    - NSE (Nash-Sutcliffe) y KGE (Kling-Gupta 2009), con el satélite como referencia.
+    - IC95%: de la pendiente, del intercepto (t de Student, n-2 g.l.) y del sesgo (t, n-1 g.l.)."""
     d = df_sub[[x, y]].dropna()
-    if len(d) < 3: return None
-    X, yv = d[[x]].values, d[y].values
-    mod = LinearRegression().fit(X, yv)
-    err = yv - d[x].values
-    return {'n': int(len(d)), 'R²': float(r2_score(yv, mod.predict(X))),
-            'Pendiente': float(mod.coef_[0]), 'Intercepto': float(mod.intercept_),
-            'Sesgo (Sat − Uas)': float(err.mean()), 'MAE': float(np.abs(err).mean()),
-            'RMSE': float(np.sqrt((err ** 2).mean()))}
+    n = len(d)
+    if n < 3: return None
+    sim = d[x].values.astype(float)   # dron
+    obs = d[y].values.astype(float)   # satélite (referencia)
+    mod = LinearRegression().fit(sim.reshape(-1, 1), obs)
+    err = obs - sim
+    rmse = float(np.sqrt((err ** 2).mean()))
+    nan = float('nan')
+
+    # NSE
+    ss_tot = float(((obs - obs.mean()) ** 2).sum())
+    nse = 1.0 - float((err ** 2).sum()) / ss_tot if ss_tot > 0 else nan
+    # PBIAS y NRMSE
+    suma_obs = float(obs.sum())
+    pbias = 100.0 * float(err.sum()) / suma_obs if suma_obs != 0 else nan
+    rango = float(obs.max() - obs.min())
+    nrmse = 100.0 * rmse / rango if rango > 0 else nan
+    # KGE (Gupta et al., 2009): r, alpha = sd_sim/sd_obs, beta = mu_sim/mu_obs
+    if sim.std() > 0 and obs.std() > 0 and obs.mean() != 0:
+        r = float(np.corrcoef(sim, obs)[0, 1])
+        alpha = float(sim.std(ddof=1) / obs.std(ddof=1))
+        beta = float(sim.mean() / obs.mean())
+        kge = 1.0 - float(np.sqrt((r - 1) ** 2 + (alpha - 1) ** 2 + (beta - 1) ** 2))
+    else:
+        kge = nan
+
+    # Intervalos de confianza
+    pct = int(round(NIVEL_CONF * 100))
+    q = 1 - (1 - NIVEL_CONF) / 2
+    t_reg, t_med = stats.t.ppf(q, n - 2), stats.t.ppf(q, n - 1)
+    try:
+        lr = stats.linregress(sim, obs)
+        se_b, se_a = float(lr.stderr), float(lr.intercept_stderr)
+    except ValueError:  # dron constante: no hay regresión definida
+        se_b = se_a = nan
+    b, a = float(mod.coef_[0]), float(mod.intercept_)
+    se_sesgo = float(err.std(ddof=1)) / np.sqrt(n)
+    sesgo = float(err.mean())
+
+    return {'n': int(n), 'R²': float(r2_score(obs, mod.predict(sim.reshape(-1, 1)))),
+            'NSE': nse, 'KGE': kge,
+            'Pendiente': b, 'Intercepto': a,
+            'Sesgo (Sat − Uas)': sesgo, 'PBIAS (%)': pbias,
+            'MAE': float(np.abs(err).mean()), 'RMSE': rmse, 'NRMSE (%)': nrmse,
+            f'Pendiente IC{pct}% inf': b - t_reg * se_b, f'Pendiente IC{pct}% sup': b + t_reg * se_b,
+            f'Intercepto IC{pct}% inf': a - t_reg * se_a, f'Intercepto IC{pct}% sup': a + t_reg * se_a,
+            f'Sesgo IC{pct}% inf': sesgo - t_med * se_sesgo, f'Sesgo IC{pct}% sup': sesgo + t_med * se_sesgo}
 
 def tabla_metricas(df, grupos=None):
     """Tabla de métricas por grupo (columna o lista de columnas). Sin grupos: una fila global."""
@@ -147,7 +193,7 @@ def mostrar_tabla_metricas(df, grupos=None):
 
 def mostrar_metricas_ajuste(df):
     st.markdown("**Métricas de ajuste (Satélite vs Dron)**")
-    st.caption("Sesgo, MAE y RMSE miden el error directo entre sensores (contra la línea 1:1), en unidades de reflectancia. Pendiente, intercepto y R² provienen de la regresión Sat = a + b · Dron. Hay buena concordancia cuando la pendiente es cercana a 1, el intercepto y el sesgo cercanos a 0, y el RMSE es bajo.")
+    st.caption("Sesgo, MAE y RMSE miden el error directo entre sensores (contra la línea 1:1), en unidades de reflectancia. PBIAS y NRMSE son esos mismos errores en porcentaje (PBIAS respecto a la suma del satélite, NRMSE respecto a su rango). NSE y KGE comparan al dron con el satélite como referencia: 1 es concordancia perfecta, y valores ≤ 0 indican que el dron no mejora a la media del satélite (NSE) o un desempeño muy deficiente (KGE). Pendiente, intercepto y R² provienen de la regresión Sat = a + b · Dron. Hay buena concordancia cuando la pendiente es cercana a 1, el intercepto, el sesgo y el PBIAS cercanos a 0, y el RMSE y NRMSE son bajos. Las columnas IC95% son intervalos de confianza de la pendiente, el intercepto y el sesgo: si el intervalo de la pendiente incluye 1 (o el del intercepto/sesgo incluye 0) no hay evidencia de desviación respecto de la línea 1:1. Los puntos se sortean dentro de los polígonos y pueden tener autocorrelación espacial, por lo que los intervalos son optimistas.")
     t = st.tabs(["Global", "Por cobertura", "Por banda", "Cobertura × banda"])
     with t[0]: mostrar_tabla_metricas(df)
     with t[1]: mostrar_tabla_metricas(df, 'Cobertura')
@@ -1182,6 +1228,9 @@ n: puntos válidos en ambos sensores.
 Pendiente, Intercepto, R²: de la regresión Sat = a + b · Dron.
 Sesgo (Sat - Uas): promedio de (Sat - Dron). MAE: error absoluto medio. RMSE: raíz del error cuadrático medio.
 Sesgo, MAE y RMSE se calculan contra la línea 1:1 (unidades de reflectancia o del índice).
+PBIAS (%): 100·Σ(Sat - Dron)/ΣSat; positivo = el dron subestima. NRMSE (%): RMSE / rango del satélite.
+NSE (Nash-Sutcliffe) y KGE (Kling-Gupta 2009): satélite como referencia; 1 = concordancia perfecta.
+IC95%: intervalos de confianza (t de Student) de la pendiente, el intercepto y el sesgo.
 El R² global y por cobertura agrupa todas las bandas y suele quedar elevado; para evaluar al dron, priorice las métricas por banda.
 
 Archivos incluidos: {len(contenido)}
@@ -1977,7 +2026,7 @@ else:
     * **Remuestreo:** el dron se remuestrea a 2 m para el visor espacial y a la resolución del satélite (ej. 10 m) para compararlos en igualdad de condiciones. También se conserva su resolución nativa.
     * **Muestreo:** en cada cobertura se sortean hasta 100 puntos aleatorios dentro de sus polígonos, ponderados por área. El sorteo usa una semilla fija, por lo que los resultados son reproducibles. Los píxeles sin dato se descartan.
     * **Firmas e índices:** se promedia la reflectancia de los puntos por banda y cobertura, y se calculan NDVI, NDWI, MNDWI, NDMI y SAVI (cada índice se calcula solo si el sensor tiene las bandas necesarias).
-    * **Ajuste radiométrico:** se ajusta una regresión lineal Satélite = a + b · Dron sobre los puntos válidos en ambos sensores, por cobertura, por banda y global, y se reporta el $R^2$ junto con la pendiente, el intercepto, el sesgo, el MAE y el RMSE (error directo entre sensores). Se muestra también la línea 1:1.
+    * **Ajuste radiométrico:** se ajusta una regresión lineal Satélite = a + b · Dron sobre los puntos válidos en ambos sensores, por cobertura, por banda y global, y se reporta el $R^2$ junto con la pendiente, el intercepto, el sesgo, el PBIAS, el MAE, el RMSE, el NRMSE, el NSE y el KGE (error directo entre sensores, con el satélite como referencia), además de intervalos de confianza al 95% para la pendiente, el intercepto y el sesgo. Se muestra también la línea 1:1.
     """)
 
     st.markdown("#### Qué encontrará en los resultados")
@@ -1987,7 +2036,7 @@ else:
     * **Visor espacial:** mapa interactivo con los límites de cada sensor y las coberturas, gráfico de superficie por cobertura (ha), y mapas en color real, falso color, índices y banda individual (en hiperespectral, un deslizador para recorrer las bandas).
     * **Firmas espectrales:** curvas de reflectancia del dron y del satélite, generales y por cobertura.
     * **Estadística de índices** (multiespectral): distribución de cada índice por cobertura y sensor, y su dispersión dron vs satélite.
-    * **Ajuste radiométrico** (multiespectral): $R^2$ por cobertura, regresión global, regresiones por cobertura y por banda, y una tabla de métricas de error (pendiente, intercepto, sesgo, MAE y RMSE). Puede filtrar las bandas que entran al cálculo.
+    * **Ajuste radiométrico** (multiespectral): $R^2$ por cobertura, regresión global, regresiones por cobertura y por banda, y una tabla de métricas de error (pendiente, intercepto, sesgo, PBIAS, MAE, RMSE, NRMSE, NSE, KGE e intervalos de confianza al 95%). Puede filtrar las bandas que entran al cálculo.
     * **Comparación global:** con vector cargado, aparece una pestaña final que compara todas las escenas: evolución de las firmas, resumen de $R^2$ y evolución temporal de los índices.
 
     Todos los gráficos se pueden descargar en PNG de alta resolución, y las tablas numéricas en CSV desde los *Centros de descargas*. Además, el botón **Descargar todos los resultados (ZIP)**, en la parte superior de los resultados, reúne todo en un solo archivo ordenado por carpetas.
