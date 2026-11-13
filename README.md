@@ -12,6 +12,7 @@ Los drones comerciales con sensores multiespectrales (MicaSense, Sentera, etc.) 
 - **Visor espacial** (se puede activar o desactivar) con mapa interactivo, superficie por cobertura (ha) y mapas en color real, falso color, índices y banda individual.
 - **Análisis multitemporal:** hasta 10 escenas (fechas o campañas) y una pestaña de comparación global.
 - **Métricas de concordancia:** además del $R^2$, pendiente, intercepto, sesgo, PBIAS, MAE, RMSE, NRMSE, NSE y KGE entre satélite y dron, con intervalos de confianza al 95% para la pendiente, el intercepto y el sesgo. Se calculan por escena, cobertura y banda.
+- **Guía de interpretación integrada:** una sección dentro de la comparación global que revisa los resultados con reglas fijas (offset mal aplicado, bandas mal asignadas, valores de relleno, muestras repetidas, píxeles mixtos) y simula una calibración con escena excluida.
 - **Exportación:** cada gráfico en PNG de alta resolución (300 dpi) y cada tabla en CSV, o **todo junto en un único ZIP** con un solo clic.
 - **Modo visor:** si no se carga un archivo vectorial, la plataforma funciona solo como visor espacial.
 
@@ -22,11 +23,13 @@ Los drones comerciales con sensores multiespectrales (MicaSense, Sentera, etc.) 
 
 Las dependencias están en `requirements.txt`. Las principales son `streamlit`, `streamlit-folium`, `rasterio`, `geopandas`, `shapely`, `pyogrio`, `numpy`, `pandas`, `scipy`, `scikit-learn`, `plotly`, `matplotlib`, `matplotlib-scalebar`, `folium` y `contextily`. Las versiones mínimas fueron probadas, y también las versiones más recientes disponibles a octubre de 2026.
 
+La guía de interpretación (`guia_validacion.py`) usa solo `numpy`, `pandas` y `streamlit`, que ya están en la lista.
+
 ## Instalación y ejecución
 
 Los pasos son los mismos en ambos sistemas: crear un entorno virtual, instalar las dependencias y ejecutar la aplicación. Cambian los comandos. No hace falta instalar GDAL aparte: `rasterio` y `geopandas` ya traen sus librerías en las versiones precompiladas.
 
-Ubíquese primero en la carpeta del proyecto (la que contiene `app.py`).
+Ubíquese primero en la carpeta del proyecto (la que contiene `app.py` y `guia_validacion.py`).
 
 ### Linux (Ubuntu / Debian)
 
@@ -86,13 +89,16 @@ Para usar otro puerto: `streamlit run app.py --server.port 8502`.
 ```
 .
 ├── app.py                  # Aplicación completa
+├── guia_validacion.py      # Guía de interpretación y simulación de calibración (la importa app.py)
 ├── requirements.txt        # Dependencias
 ├── README.md
 └── .streamlit/
     └── config.toml         # Configuración de Streamlit (límite de carga)
 ```
 
-> **Importante:** `config.toml` debe estar dentro de la carpeta `.streamlit/` para que Streamlit lo lea. Define `server.maxUploadSize = 1000`, que permite cargar archivos de hasta 1000 MB.
+> **Importante:** `guia_validacion.py` debe estar en la misma carpeta que `app.py`; si falta, la aplicación no inicia (`ModuleNotFoundError`).
+>
+> `config.toml` debe estar dentro de la carpeta `.streamlit/` para que Streamlit lo lea. Define `server.maxUploadSize = 1000`, que permite cargar archivos de hasta 1000 MB.
 
 ## Guía de uso
 
@@ -103,7 +109,7 @@ Todo se configura en el panel lateral, de arriba hacia abajo:
 3. **Visor espacial:** casilla *Activar visor espacial* (activa por defecto). Si se desactiva, no se generan los mapas ni el mapa interactivo.
 4. **Escenas:** cantidad de escenas (1 a 10) y, para cada una, el GeoTIFF del dron y/o del satélite. En hiperespectral solo se carga la imagen hiperespectral.
 5. **Ajustes radiométricos:** preset del satélite (o *Personalizado*), nombre del sensor para los gráficos y escala/offset del dron.
-6. **Configuración de bandas** (solo multiespectral): número de banda de cada color, para dron y satélite.
+6. **Configuración de bandas** (solo multiespectral): orden de bandas del TIF satélite y número de banda de cada color, para dron y satélite.
 7. **Ejecutar plataforma.** Los resultados de cada escena se procesan al abrir su pestaña. **Reiniciar entorno** limpia la sesión.
 
 ### Datos de entrada
@@ -132,29 +138,33 @@ Ambos sensores deben quedar entre 0 y 1. Presets disponibles para el satélite:
 |---|---|---|
 | Google Earth Engine (Escala 10000) | 10000 | 0 |
 | Google Earth Engine (Reflectancia 0-1) | 1 | 0 |
-| Sentinel-2 (L2A post-2022) | 10000 | -1000 |
-| Sentinel-2 (L2A pre-2022) | 10000 | 0 |
+| Sentinel-2 (L2A Copernicus directo, post-2022) | 10000 | -1000 |
+| Sentinel-2 (L2A Copernicus directo, pre-2022) | 10000 | 0 |
 | Landsat 8/9 (Collection 2 Level 2) | 36363.636 | -7272.727 |
 | PlanetScope (SuperDove) | 10000 | 0 |
 | Prisma (L2D), solo hiperespectral | 65535 | 0 |
 | Personalizado | editable | editable |
 
-Por defecto se preselecciona *Sentinel-2 (L2A post-2022)* en multiespectral y *Prisma (L2D)* en hiperespectral. La escala y el offset del satélite solo se pueden editar con *Personalizado*. Para el dron, la escala y el offset se ingresan siempre a mano (por defecto 1 y 0).
+Por defecto se preselecciona *Google Earth Engine (Escala 10000)* en multiespectral y *Prisma (L2D)* en hiperespectral. La escala y el offset del satélite solo se pueden editar con *Personalizado*. Para el dron, la escala y el offset se ingresan siempre a mano (por defecto 1 y 0).
 
 El campo **Nombre en gráficos** es el nombre del satélite que aparece en leyendas y títulos. Se sugiere automáticamente según el preset.
 
-> Si exporta Sentinel-2 desde Google Earth Engine con la colección armonizada (`S2_SR_HARMONIZED`), el offset ya viene corregido: use offset 0. El preset *post-2022* es para productos L2A descargados directamente de Copernicus.
+> **Offset de Sentinel-2.** Los productos L2A posteriores a enero de 2022 (baseline 04.00) traen un offset de 1000 que hay que restar. La colección `COPERNICUS/S2_SR_HARMONIZED` de Google Earth Engine ya lo resta, así que lo exportado desde ahí se usa con **offset 0**. El preset *Copernicus directo, post-2022* (offset -1000) es solo para productos L2A descargados de Copernicus sin armonizar. Aplicar -1000 sobre un producto ya armonizado lo resta dos veces: el satélite queda unos 0,1 por debajo del dron, con reflectancias negativas y métricas como NSE y KGE muy deterioradas, aunque el $R^2$ y la pendiente no cambien. La guía de interpretación avisa de este caso.
 
 ### Configuración de bandas
 
 Se ingresa el número de banda (comenzando en 1) de **azul, verde, rojo, red edge, NIR, SWIR 1 y SWIR 2**, según el orden en que están guardadas en el TIF. **Si el sensor no tiene una banda, se ingresa 0**, y los índices que dependan de ella no se calculan.
 
-Valores por defecto:
+Para el satélite hay un selector **Orden de bandas del TIF satélite** que rellena los números según el archivo:
 
-| Sensor | Azul | Verde | Rojo | Red edge | NIR | SWIR 1 | SWIR 2 |
+| Opción | Azul | Verde | Rojo | Red edge | NIR | SWIR 1 | SWIR 2 |
 |---|---|---|---|---|---|---|---|
-| Dron | 1 | 2 | 3 | 4 | 5 | 0 | 0 |
-| Satélite | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| Script GEE de 10 bandas (B2, B3, B4, B5, B6, B7, B8, B8A, B11, B12), opción por defecto | 1 | 2 | 3 | 4 | 7 (B8) | 9 (B11) | 10 (B12) |
+| 7 bandas en orden (azul, verde, rojo, red edge, NIR, SWIR 1, SWIR 2) | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+
+Los números se pueden editar a mano después de elegir la opción. Para el dron, los valores por defecto son 1, 2, 3, 4, 5, 0 y 0 (sin SWIR).
+
+> **Verifique el orden de bandas de su TIF** (por ejemplo, con la descripción de bandas en QGIS). Con el script GEE de 10 bandas, usar `[1, 2, 3, 4, 5, 6, 7]` lee B6 como NIR y B7 y B8 como SWIR, lo que deja el NIR, el SWIR 1 y el SWIR 2 casi iguales. Se usa B8 y no B8A como NIR porque B8 es de 10 m nativos.
 
 Solo se comparan entre sensores las bandas que están configuradas en ambos.
 
@@ -166,7 +176,7 @@ Solo se comparan entre sensores las bandas que están configuradas en ambos.
    - *Visor espacial:* solo se reduce a 2 m si el dron es más fino que 2 m.
    - *Comparación con el satélite:* se lleva a la **grilla exacta del satélite**. Si el dron es más fino, se promedia; si ya tiene la misma resolución y está alineado, se usa sin suavizar; si tiene la misma resolución pero está desfasado, se realinea; y si es más grueso que el satélite, la app muestra un aviso para interpretar las métricas con cautela. El aviso aparece bajo el mapa interactivo.
    - Los datos del dron a resolución del satélite aparecen en los gráficos como `Uas (10m)`, aunque el satélite no sea de 10 m.
-4. **Muestreo:** en cada cobertura se sortean hasta 100 puntos aleatorios dentro de sus polígonos, ponderados por área, con semilla fija (resultados reproducibles). Se descartan los píxeles sin dato.
+4. **Muestreo:** en cada cobertura se sortean hasta 100 puntos aleatorios dentro de sus polígonos, ponderados por área, con semilla fija (resultados reproducibles). **Se toma como máximo un punto por píxel** de la grilla del satélite, de modo que no hay muestras repetidas y el n declarado es el n efectivo. En coberturas pequeñas o angostas (por ejemplo un cauce) puede haber menos de 100 puntos: esa cifra es el número real de píxeles distintos disponibles. Se descartan los píxeles sin dato, incluido el valor de relleno `-9999` que escribe GEE con `unmask(-9999)`, aunque el TIF no declare nodata.
 5. **Firmas:** promedio de la reflectancia de los puntos por banda y cobertura.
 6. **Índices:** se calculan solo si existen las bandas necesarias.
 
@@ -196,7 +206,7 @@ Solo se comparan entre sensores las bandas que están configuradas en ambos.
 
    Sesgo, MAE y RMSE se calculan contra la línea 1:1, en unidades de reflectancia (o del índice). Si el intervalo de la pendiente incluye 1, o el del intercepto o el sesgo incluye 0, no hay evidencia de desviación respecto de la línea 1:1.
 
-   > Los puntos se sortean dentro de los polígonos y pueden tener autocorrelación espacial, por lo que los intervalos de confianza son optimistas.
+   > Aunque el muestreo ya no repite píxeles, los puntos se sortean dentro de los polígonos y pueden tener autocorrelación espacial (píxeles vecinos parecidos), por lo que los intervalos de confianza siguen siendo optimistas.
 
 ## Resultados
 
@@ -211,15 +221,39 @@ Cada escena tiene su pestaña con:
 
 En hiperespectral, la pestaña de cada escena se llama **Análisis de firmas hiperespectrales** y reúne las firmas general y por cobertura.
 
-Con un archivo vectorial cargado se agrega la pestaña **Comparación global**, con cuatro secciones en multiespectral:
+Con un archivo vectorial cargado se agrega la pestaña **Comparación global**, con cinco secciones en multiespectral:
 
 - **Evolución UAS** y **Evolución satélite** (completa y recortada hasta NIR): firmas por cobertura a lo largo de las escenas.
 - **Resumen de ajuste global ($R^2$):** $R^2$ por cobertura y escena, tablas de métricas por escena, escena × cobertura y escena × banda, y regresiones consolidadas. Con filtro de bandas.
 - **Evolución fenológica (índices):** evolución temporal de cada índice.
+- **Guía de interpretación:** observaciones automáticas y simulación de calibración (ver más abajo).
 
 En hiperespectral solo muestra la evolución de las firmas.
 
 Los mapas se generan con una escala de colores ajustada entre los percentiles 2 y 98 de cada imagen. Cada escena recibe un color propio en los gráficos comparativos, asignado automáticamente.
+
+### Guía de interpretación
+
+Es la última sección de **Comparación global** (multiespectral). Trabaja con los datos de todas las escenas y tiene dos partes.
+
+**1. Observaciones.** Una tabla con prioridad, dato, lectura y acción sugerida, generada con reglas fijas (no con un modelo). Las reglas son:
+
+| Regla | Se activa cuando | Qué sugiere |
+|---|---|---|
+| Sesgo uniforme entre bandas | El sesgo medio es de al menos 0,05 en valor absoluto y casi igual en todas las bandas (desviación ≤ 0,02) | Revisar el offset del satélite. Si la magnitud está entre 0,07 y 0,13, la nota lo asocia al offset de Sentinel-2 e indica el signo: sesgo negativo = offset restado de más (p. ej. -1000 sobre un producto armonizado); positivo = offset no restado |
+| Sesgo dependiente de la banda | Hay sesgo alto o variación entre bandas mayor a 0,02, pero no es uniforme | Calibrar por banda y revisar la correspondencia de bandas |
+| SWIR igual o mayor que NIR en agua | La cobertura se llama "agua" y el SWIR es mayor o igual que el NIR | Revisar el orden de bandas del TIF y los índices configurados |
+| NIR, SWIR 1 y SWIR 2 casi idénticos | Difieren menos de 5% en la mayoría de las coberturas | Confirmar el orden de bandas (con el script GEE de 10 bandas: `[1, 2, 3, 4, 7, 9, 10]`) |
+| Valores de relleno | Hay reflectancias menores a -0,5 | Declarar el nodata o excluir el valor de relleno |
+| $R^2$ alto con NSE bajo | $R^2$ global ≥ 0,85 y NSE < 0,5 | Evaluar con sesgo, RMSE y NSE por banda, no solo con $R^2$ |
+| Pendiente fuera de rango | Pendiente de una escena fuera de 0,85 a 1,15 | Revisar pureza de píxel y registro; luego evaluar calibración lineal |
+| Posible elemento más angosto que el píxel | Una cobertura con al menos 10 puntos y pendiente menor a 0,75 en una escena | Informar la limitación de resolución espacial; erosionar polígonos o excluir el borde |
+| Correlación baja en algunas bandas | $R^2$ menor a 0,75 en una escena × banda | Erosionar polígonos, filtrar por pureza y revisar el registro |
+| Muestras repetidas | Más de 10% de las filas duplicadas en una escena | Informar el n efectivo |
+
+Los umbrales están al comienzo de `guia_validacion.py` y se pueden ajustar. Las reglas sobre SWIR leen las firmas del satélite, porque el dron no tiene SWIR y esas bandas no aparecen en las correlaciones.
+
+**2. Simulación de calibración.** Se calibra el dron hacia el satélite con las demás escenas (por offset medio por banda o por regresión lineal) y se evalúa en la escena elegida, mostrando sesgo, RMSE y NSE antes y después. Requiere al menos dos escenas. Si el sesgo viene de un offset mal aplicado en el satélite, lo correcto es corregir ese parámetro y no calibrar el dron.
 
 ### Descargas
 
@@ -242,13 +276,14 @@ resultados_AAAAMMDD_HHMM.zip
 
 Los CSV de `datos/` de cada escena incluyen `firmas`, `correlacion_bandas`, `indices`, `correlacion_indices`, `superficie_por_cobertura` (en m² y ha) y las métricas global, por cobertura, por banda, cobertura × banda y por índice. En `global/datos/` están las firmas, correlaciones e índices de todas las escenas, y las métricas por escena, escena × cobertura y escena × banda.
 
-> En modo hiperespectral el ZIP incluye las firmas y tablas, pero no mapas por banda (pueden ser cientos).
+> En modo hiperespectral el ZIP incluye las firmas y tablas, pero no mapas por banda (pueden ser cientos). La guía de interpretación no se incluye en el ZIP.
 
 ### Cómo interpretar los resultados
 
 - Un $R^2$ cercano a 1 indica que ambos sensores varían de forma muy parecida. Revise también la **línea 1:1**: un $R^2$ alto no detecta por sí solo un desfase o una diferencia de escala sistemática.
 - El $R^2$ global y por cobertura agrupa todas las bandas, y las diferencias naturales entre bandas (ej. NIR vs azul) lo elevan. Para evaluar la calidad del dron, priorice las métricas **por banda** y **cobertura × banda**, y dentro de ellas el **RMSE**, la **pendiente**, el **sesgo**, el **NSE** y el **KGE**.
-- El píxel satelital mezcla varias superficies. En coberturas heterogéneas es normal un $R^2$ menor y curvas satelitales más aplanadas (efecto de píxel mixto).
+- El píxel satelital mezcla varias superficies. En coberturas heterogéneas es normal un $R^2$ menor y curvas satelitales más aplanadas (efecto de píxel mixto). En elementos más angostos que el píxel (un cauce, una franja de orilla) la pendiente baja y el NIR suele ser la banda más afectada.
+- Si todas las bandas muestran el mismo sesgo (cercano a 0,1 en Sentinel-2), sospeche primero del offset y no del dron. Si el NIR y el SWIR salen casi iguales, sospeche del orden de bandas.
 
 ## Limitaciones conocidas
 
@@ -256,7 +291,9 @@ Los CSV de `datos/` de cada escena incluyen `firmas`, `correlacion_bandas`, `ind
 - **Hiperespectral sin descripciones de banda:** si el TIF no trae descripciones con la longitud de onda, las bandas se llaman `Banda_N` y el eje X muestra el número de banda en lugar de nanómetros.
 - **Hiperespectral:** no calcula índices ni regresiones. Se omiten las bandas con reflectancia nula o igual a 0 en la firma.
 - **Banda individual (multiespectral):** el selector ofrece las bandas 1 a 7.
-- **Valores sin dato:** en los mapas, los píxeles con valor menor o igual a 0 se consideran sin dato.
+- **Valores sin dato:** en los mapas, los píxeles con valor menor o igual a 0 se consideran sin dato. El valor de relleno `-9999` se excluye en las firmas y correlaciones, pero no se trata de forma especial en los mapas de banda individual.
+- **Resolución de las bandas de Sentinel-2:** B5, B6, B7, B8A, B11 y B12 son de 20 m nativos y GEE las exporta a 10 m replicándolas, por lo que red edge y SWIR están más mezclados que azul, verde, rojo y NIR.
+- **Guía de interpretación:** son reglas fijas con umbrales de partida. Orientan la revisión, no reemplazan el criterio del usuario. Los nombres de cobertura que contienen "agua" activan la regla de SWIR en agua.
 - **Mapas en línea:** el mapa interactivo usa Google Satélite como fondo, y los mapas de contexto regional y país descargan su fondo de Esri (con respaldo en OpenStreetMap en el regional) una sola vez por escena. Sin internet, el análisis funciona, pero esos mapas muestran el aviso "Mapa base no disponible". Tras un fallo, la app no reintenta durante 5 minutos.
 
 ## Solución de problemas
@@ -268,7 +305,10 @@ Los CSV de `datos/` de cada escena incluyen `firmas`, `correlacion_bandas`, `ind
 | *El raster no tiene píxeles con datos válidos* | El dron no tiene datos válidos: todos sus píxeles son nodata o 0. Revise el archivo. |
 | *Se requiere al menos una imagen en la primera escena* | Cargue al menos un TIF en la escena 1. |
 | *Atención: el dron es más grueso que el satélite* | Aviso, no un error. No hay detalle extra para comparar, así que interprete las métricas con cautela. |
-| Una cobertura no aparece en la regresión | Tiene menos de 3 puntos válidos en ambos sensores (polígono pequeño o fuera de la imagen). |
+| Una cobertura no aparece en la regresión | Tiene menos de 3 puntos válidos en ambos sensores (polígono pequeño, angosto o fuera de la imagen). Con un punto por píxel, las coberturas angostas tienen pocos puntos. |
+| Sesgo cercano a ±0,1 en todas las bandas, o reflectancias negativas en el satélite | Offset mal aplicado. Con S2_SR_HARMONIZED de GEE use el preset de GEE (offset 0). |
+| NIR, SWIR 1 y SWIR 2 casi iguales, o SWIR mayor que NIR en agua | Orden de bandas mal configurado. Revise la descripción de bandas del TIF y use el selector *Orden de bandas del TIF satélite*. |
+| `ModuleNotFoundError: guia_validacion` | `guia_validacion.py` no está en la misma carpeta que `app.py`. |
 | `TypeError` en `st.plotly_chart(width=...)` | Streamlit es anterior a 1.51. Ejecute `pip install -U -r requirements.txt`. |
 | `python3 -m venv` falla en Linux (*ensurepip is not available*) | Falta el paquete de venv: `sudo apt install python3-venv`. |
 | PowerShell no deja activar el entorno (Windows) | Ejecute `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` o use el Símbolo del sistema con `venv\Scripts\activate.bat`. |
