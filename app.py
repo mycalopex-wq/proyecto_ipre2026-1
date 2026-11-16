@@ -211,6 +211,230 @@ def mostrar_metricas_globales(df):
     with t[1]: mostrar_tabla_metricas(df, ['Escena', 'Cobertura'])
     with t[2]: mostrar_tabla_metricas(df, ['Escena', 'Banda'])
 
+# ================= GUÍA DE INTERPRETACIÓN (reglas fijas) =================
+# Entrada: DataFrame con columnas Cobertura, Banda, Uas, Sat, Escena (como all_c).
+# ---------- Umbrales (ajústalos aquí) ----------
+UMBRAL_SESGO_ALTO = 0.05      # |sesgo| desde el cual se considera relevante
+RANGO_OFFSET = (0.07, 0.13)   # sesgo compatible con offset S2 (1000/10000 = 0.1)
+DISPERSION_SESGO_MAX = 0.02   # desv. estándar del sesgo entre bandas = "constante"
+R2_ALTO, R2_BAJO = 0.85, 0.75
+PENDIENTE_OK = (0.85, 1.15)
+NSE_BAJO = 0.5
+DUPLICADOS_MAX = 0.10
+PENDIENTE_ANGOSTO = 0.75      # pendiente bajo la cual se sospecha elemento más angosto que el píxel
+SWIR_NIR_AGUA = 1.0           # en agua, SWIR/NIR >= este valor sugiere bandas mal asignadas
+BANDAS_PLANAS_TOL = 0.05      # |SWIR - NIR| / NIR bajo este valor = bandas casi idénticas
+VALOR_RELLENO = -0.5          # reflectancia bajo la cual se asume valor de relleno (ej. -9999)
+
+
+# ---------- Métricas ----------
+def guia_metricas(x, y):
+    """x = dron, y = satélite. Devuelve dict con las métricas principales."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    if len(x) < 3 or x.std() == 0 or y.std() == 0:
+        return dict(n=len(x), sesgo=np.nan, rmse=np.nan, r2=np.nan,
+                    pendiente=np.nan, intercepto=np.nan, nse=np.nan, kge=np.nan)
+    b, a = np.polyfit(x, y, 1)
+    r = np.corrcoef(x, y)[0, 1]
+    res = y - x
+    nse = 1 - (res ** 2).sum() / ((y - y.mean()) ** 2).sum()
+    kge = 1 - np.sqrt((r - 1) ** 2 + (x.std() / y.std() - 1) ** 2
+                      + (x.mean() / y.mean() - 1) ** 2)
+    return dict(n=len(x), sesgo=res.mean(), rmse=np.sqrt((res ** 2).mean()),
+                r2=r ** 2, pendiente=b, intercepto=a, nse=nse, kge=kge)
+
+
+def guia_tabla_metricas(df, por):
+    filas = []
+    for clave, g in df.groupby(por):
+        d = guia_metricas(g["Uas"], g["Sat"])
+        d.update({por if isinstance(por, str) else "/".join(por): clave})
+        filas.append(d)
+    return pd.DataFrame(filas).set_index(por if isinstance(por, str) else "/".join(por))
+
+
+# ---------- Notas de interpretación (reglas fijas) ----------
+def _nota(prioridad, titulo, dato, lectura, accion):
+    return dict(prioridad=prioridad, titulo=titulo, dato=dato,
+                lectura=lectura, accion=accion)
+
+
+def diagnosticar_bandas_sat(df_firmas, sat_name):
+    """Revisa asignación de bandas del satélite con las firmas (Cobertura, Banda, Sensor, Reflectancia)."""
+    n = []
+    if df_firmas is None or df_firmas.empty:
+        return n
+    f = df_firmas[df_firmas["Sensor"] == sat_name]
+    if f.empty:
+        return n
+    p = f.groupby(["Cobertura", "Banda"])["Reflectancia"].mean().unstack("Banda")
+    if "Nir" not in p.columns or not ({"Swir 1", "Swir 2"} & set(p.columns)):
+        return n
+    swir = "Swir 1" if "Swir 1" in p.columns else "Swir 2"
+
+    # 1) SWIR >= NIR en agua
+    for cob in p.index:
+        if "agua" in str(cob).lower() and p.loc[cob, "Nir"] > 0:
+            r = p.loc[cob, swir] / p.loc[cob, "Nir"]
+            if r >= SWIR_NIR_AGUA:
+                n.append(_nota("Alta", f"SWIR igual o mayor que NIR en agua: {cob}",
+                               f"{swir}/NIR = {r:.2f} (NIR {p.loc[cob, 'Nir']:.3f}, {swir} {p.loc[cob, swir]:.3f}).",
+                               "En agua el SWIR debe ser mucho menor que el NIR. Señal de bandas del satélite mal asignadas.",
+                               "Revisar el orden de bandas del TIF (descripción de bandas en QGIS) y los índices configurados."))
+
+    # 2) NIR, SWIR 1 y SWIR 2 casi planos en la mayoría de las coberturas
+    cols = [c for c in ["Nir", "Swir 1", "Swir 2"] if c in p.columns]
+    if len(cols) == 3:
+        planas = [c for c in p.index if p.loc[c, "Nir"] > 0 and
+                  all(abs(p.loc[c, b] - p.loc[c, "Nir"]) / p.loc[c, "Nir"] < BANDAS_PLANAS_TOL for b in ["Swir 1", "Swir 2"])]
+        if len(planas) >= max(2, len(p.index) / 2):
+            n.append(_nota("Alta", "NIR, SWIR 1 y SWIR 2 casi idénticos",
+                           f"Diferencia menor a {BANDAS_PLANAS_TOL:.0%} en: {', '.join(map(str, planas))}.",
+                           "Bandas distintas del espectro no suelen coincidir; probable lectura repetida o posiciones de banda erróneas.",
+                           "Confirmar el orden de bandas del TIF. Con el script GEE de 10 bandas: [1, 2, 3, 4, 7, 9, 10]."))
+    return n
+
+
+def diagnosticar(df, df_firmas=None, sat_name=None):
+    n = []
+    if sat_name is not None:
+        n += diagnosticar_bandas_sat(df_firmas, sat_name)
+
+    relleno = ((df["Sat"] < VALOR_RELLENO) | (df["Uas"] < VALOR_RELLENO)).mean()
+    if relleno > 0:
+        n.append(_nota("Alta", "Valores de relleno en las muestras",
+                       f"{relleno:.1%} de las filas tienen reflectancia menor a {VALOR_RELLENO}.",
+                       "Probable valor sin dato (p. ej. -9999 de GEE) leído como reflectancia.",
+                       "Declarar el nodata en el TIF o excluir el valor de relleno antes de calcular."))
+    por_banda = guia_tabla_metricas(df, "Banda")
+    por_escena = guia_tabla_metricas(df, "Escena")
+    glob = guia_metricas(df["Uas"], df["Sat"])
+
+    sesgo_medio, disp = por_banda["sesgo"].mean(), por_banda["sesgo"].std()
+    neg = (df["Sat"] < 0).mean()
+    if abs(sesgo_medio) >= UMBRAL_SESGO_ALTO and disp <= DISPERSION_SESGO_MAX:
+        cerca_offset = RANGO_OFFSET[0] <= abs(sesgo_medio) <= RANGO_OFFSET[1]
+        dato = f"Sesgo medio {sesgo_medio:+.3f}, variación entre bandas {disp:.3f}."
+        if neg > 0.005:
+            dato += f" Reflectancia negativa en {neg:.1%} de los valores del satélite."
+        lectura = "Desplazamiento uniforme en todas las bandas, compatible con un error de offset."
+        if cerca_offset:
+            lectura += " La magnitud coincide con el offset de Sentinel-2 (0,1)."
+            if sesgo_medio < 0:
+                lectura += (" Satélite por debajo del dron: probable offset restado de más "
+                            "(p. ej. -1000 sobre un producto ya armonizado, como S2_SR_HARMONIZED de GEE).")
+            else:
+                lectura += " Satélite por encima del dron: probable offset no restado (producto post-2022 sin armonizar)."
+        n.append(_nota("Alta", "Sesgo uniforme entre bandas", dato, lectura,
+                       "Verificar el offset del satélite y el nivel de procesamiento del producto."))
+    elif abs(sesgo_medio) >= UMBRAL_SESGO_ALTO or disp > DISPERSION_SESGO_MAX:
+        peor = por_banda["sesgo"].abs().idxmax()
+        n.append(_nota("Media", "Sesgo dependiente de la banda",
+                       f"Mayor sesgo en {peor} ({por_banda.loc[peor, 'sesgo']:+.3f}); "
+                       f"variación entre bandas {disp:.3f}.",
+                       "El error no es uniforme; apunta a diferencias de calibración espectral.",
+                       "Calibrar por banda y revisar la correspondencia de bandas."))
+
+    if glob["r2"] >= R2_ALTO and glob["nse"] < NSE_BAJO:
+        n.append(_nota("Media", "R² alto con NSE bajo",
+                       f"R² {glob['r2']:.2f}; NSE {glob['nse']:.2f}; KGE {glob['kge']:.2f}.",
+                       "Hay coincidencia de patrón, no de nivel absoluto.",
+                       "Evaluar con sesgo, RMSE y NSE por banda, no solo con R²."))
+
+    for esc, f in por_escena.iterrows():
+        if not (PENDIENTE_OK[0] <= f["pendiente"] <= PENDIENTE_OK[1]):
+            n.append(_nota("Media", f"Pendiente fuera de rango: {esc}",
+                           f"Pendiente {f['pendiente']:.2f}.",
+                           "Respuesta distinta entre sensores (rango comprimido, mezcla de píxeles o ganancia).",
+                           "Revisar pureza de píxel y registro espacial; luego evaluar calibración lineal."))
+
+    ecm = guia_tabla_metricas(df, ["Escena", "Cobertura"])
+    ang = ecm[(ecm["n"] >= 10) & (ecm["pendiente"] < PENDIENTE_ANGOSTO)]
+    for (esc, cob), f in ang.iterrows():
+        n.append(_nota("Media", f"Posible elemento más angosto que el píxel: {esc}, {cob}",
+                       f"Pendiente {f['pendiente']:.2f}, R² {f['r2']:.2f}, n {int(f['n'])}.",
+                       "Rango comprimido en el satélite: cauces, bordes o franjas menores a 10 m mezclan cobertura con su entorno.",
+                       "Informar la limitación de resolución espacial; erosionar polígonos o excluir el borde antes de calibrar."))
+
+    ebm = guia_tabla_metricas(df, ["Escena", "Banda"])
+    bajos = ebm[ebm["r2"] < R2_BAJO]
+    if len(bajos):
+        lista = "; ".join(f"{e}, {b} (R² {r:.2f})" for (e, b), r in bajos["r2"].items())
+        n.append(_nota("Media", "Correlación baja en algunas bandas", lista,
+                       "Posible desfase de registro, píxeles mixtos o pocas muestras independientes.",
+                       "Erosionar polígonos, filtrar por pureza y revisar el registro dron-satélite."))
+
+    dup = df.groupby("Escena").apply(
+        lambda g: g.duplicated(["Banda", "Uas", "Sat"]).mean(), include_groups=False)
+    for esc, p in dup[dup > DUPLICADOS_MAX].items():
+        n.append(_nota("Alta" if p > 0.3 else "Media", f"Muestras repetidas: {esc}",
+                       f"{p:.0%} de las filas están duplicadas.",
+                       "El tamaño muestral efectivo es menor al declarado.",
+                       "Muestrear sin reemplazo e informar el n efectivo."))
+
+    if not n:
+        n.append(_nota("Sin observaciones", "Métricas dentro de los umbrales",
+                       "Sin desviaciones relevantes.", "El dron reproduce al satélite dentro de lo esperado.",
+                       "Informar las métricas por banda."))
+    return n
+
+
+# ---------- Simulación de calibración (escena excluida) ----------
+def simular_calibracion(df, metodo="offset", escena_fuera=None):
+    """
+    Calibra el dron hacia el satélite con las demás escenas y evalúa en la excluida.
+    metodo: 'offset' (dron + sesgo medio por banda) o 'lineal' (a + b·dron por banda).
+    Devuelve tabla antes/después por banda en la escena excluida.
+    """
+    entrena, prueba = df[df["Escena"] != escena_fuera], df[df["Escena"] == escena_fuera]
+    filas = []
+    for banda, g in prueba.groupby("Banda"):
+        t = entrena[entrena["Banda"] == banda]
+        if len(t) < 10:
+            continue
+        x, y = g["Uas"].values, g["Sat"].values
+        if metodo == "offset":
+            xc = x + (t["Sat"] - t["Uas"]).mean()
+        else:
+            b, a = np.polyfit(t["Uas"], t["Sat"], 1)
+            xc = a + b * x
+        antes, despues = guia_metricas(x, y), guia_metricas(xc, y)
+        filas.append(dict(Banda=banda,
+                          sesgo_antes=antes["sesgo"], sesgo_despues=despues["sesgo"],
+                          rmse_antes=antes["rmse"], rmse_despues=despues["rmse"],
+                          nse_antes=antes["nse"], nse_despues=despues["nse"]))
+    return pd.DataFrame(filas).set_index("Banda")
+
+
+# ---------- Interfaz Streamlit ----------
+def seccion_guia(df, df_firmas=None, sat_name=None):
+    st.subheader("Interpretación de resultados")
+    st.caption("Observaciones generadas por reglas fijas a partir de las métricas calculadas.")
+    notas = diagnosticar(df, df_firmas, sat_name)
+    tabla = pd.DataFrame(notas).rename(columns={
+        "prioridad": "Prioridad", "titulo": "Observación", "dato": "Dato",
+        "lectura": "Lectura", "accion": "Acción sugerida"})
+    st.dataframe(tabla, hide_index=True, use_container_width=True)
+
+    if df["Escena"].nunique() < 2:
+        st.info("La simulación de calibración requiere al menos dos escenas: se calibra con las demás y se evalúa en la excluida.")
+        return
+
+    st.subheader("Simulación de calibración")
+    st.caption("Calibración con las demás escenas y evaluación en la escena seleccionada.")
+    c1, c2 = st.columns(2)
+    escena = c1.selectbox("Escena evaluada", sorted(df["Escena"].unique()))
+    metodo = c2.radio("Método", ["offset", "lineal"], horizontal=True)
+    res = simular_calibracion(df, metodo, escena)
+    res.columns = ["Sesgo antes", "Sesgo después", "RMSE antes", "RMSE después",
+                   "NSE antes", "NSE después"]
+    st.dataframe(res.style.format("{:.3f}"), use_container_width=True)
+    st.caption("Si el sesgo se origina en el offset del satélite, corresponde corregir ese "
+               "parámetro; la calibración del dron solo compensa el error.")
+
+
 @st.cache_data
 def reproject_raster(in_path, target_crs_str):
     target_crs = rasterio.crs.CRS.from_string(target_crs_str)
@@ -797,12 +1021,22 @@ def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, uas_scale, uas_
 
         pts = []
         intentos = 0
-        while len(pts) < 100 and intentos < 2000:
+        ref_src = sat_src if sat_src is not None else uas_10m_src   # grilla de referencia: 1 punto por píxel
+        pix_usados = set()
+        while len(pts) < 100 and intentos < 5000:
             chosen_poly = np.random.choice(polys, p=probs)
             bbox = chosen_poly.bounds
             p = Point(random.uniform(bbox[0], bbox[2]), random.uniform(bbox[1], bbox[3]))
-            if p.within(chosen_poly): pts.append(p)
             intentos += 1
+            if not p.within(chosen_poly): continue
+            if ref_src is not None:
+                try:
+                    pix = ref_src.index(p.x, p.y)
+                except Exception:
+                    continue
+                if pix in pix_usados: continue   # evita muestras repetidas (n efectivo = n declarado)
+                pix_usados.add(pix)
+            pts.append(p)
 
         if not pts: continue
         coordenadas = [(pt.x, pt.y) for pt in pts]
@@ -831,6 +1065,7 @@ def calcular_firmas(data_dict, col_clase, sat_scale, sat_offset, uas_scale, uas_
         if sat_src:
             m_sat_crudo = np.array(list(sat_src.sample(coordenadas))).astype(float)
             if nodata_sat is not None: m_sat_crudo[m_sat_crudo == nodata_sat] = np.nan
+            m_sat_crudo[m_sat_crudo == -9999] = np.nan  # relleno de exportación GEE (unmask(-9999)), aunque el TIF no declare nodata
             m_sat = (m_sat_crudo + sat_offset) / sat_scale
 
             if uas_10m_src and data_dict['tipo_datos'] == "Multiespectral (dron/satélite)":
@@ -1389,8 +1624,8 @@ with st.sidebar:
     presets_satelites = {
         "Google Earth Engine (Escala 10000)": {"escala": 10000.0, "offset": 0.0},
         "Google Earth Engine (Reflectancia 0-1)": {"escala": 1.0, "offset": 0.0},
-        "Sentinel-2 (L2A post-2022)": {"escala": 10000.0, "offset": -1000.0},
-        "Sentinel-2 (L2A pre-2022)": {"escala": 10000.0, "offset": 0.0},
+        "Sentinel-2 (L2A Copernicus directo, post-2022)": {"escala": 10000.0, "offset": -1000.0},
+        "Sentinel-2 (L2A Copernicus directo, pre-2022)": {"escala": 10000.0, "offset": 0.0},
         "Landsat 8/9 (Collection 2 Level 2)": {"escala": 36363.636, "offset": -7272.727},
         "PlanetScope (SuperDove)": {"escala": 10000.0, "offset": 0.0},
         "Personalizado": {"escala": 10000.0, "offset": 0.0}
@@ -1400,8 +1635,8 @@ with st.sidebar:
          presets_satelites["Prisma (L2D)"] = {"escala": 65535.0, "offset": 0.0}
     
     st.markdown("*Satélite*")
-    sat_preset = st.selectbox("Seleccionar sensor satelital:", list(presets_satelites.keys()), index=list(presets_satelites.keys()).index("Prisma (L2D)") if "Hiperespectral" in tipo_datos else 2)
-    st.caption("La reflectancia se calcula como (valor del pixel + offset) / escala, y debe quedar entre 0 y 1. Nota: GEE usa Escala 10000 (si exportó la colección armonizada S2_SR_HARMONIZED, el offset ya está corregido: use offset 0). Si su imagen es Sentinel-2 L2A descargada directamente de Copernicus (2022 en adelante), use el preset post-2022 (offset -1000).")
+    sat_preset = st.selectbox("Seleccionar sensor satelital:", list(presets_satelites.keys()), index=list(presets_satelites.keys()).index("Prisma (L2D)") if "Hiperespectral" in tipo_datos else 0)
+    st.caption("La reflectancia se calcula como (valor del pixel + offset) / escala, y debe quedar entre 0 y 1. Si exportó desde Google Earth Engine con COPERNICUS/S2_SR_HARMONIZED, el offset de 1000 (baseline 04.00, desde 2022) ya está restado: use el preset de GEE (offset 0). Use -1000 solo con producto L2A bajado directo de Copernicus, posterior a 2022, sin armonizar. Un sesgo medio cercano a ±0,1 entre sensores suele indicar un offset mal aplicado.")
     
     sat_name = st.text_input("Nombre en gráficos:", sat_preset.split(" (")[0] if sat_preset not in ["Personalizado", "Google Earth Engine (Reflectancia 0-1)", "Google Earth Engine (Escala 10000)"] else "Satélite GEE")
     es_personalizado = (sat_preset == "Personalizado")
@@ -1421,6 +1656,13 @@ with st.sidebar:
     if tipo_datos == "1. Multiespectral (dron/satélite)":
         st.markdown("**4. Configuración de bandas (índice)**")
         st.caption("Ingrese el número de banda (comenzando en 1) según el orden en que está guardada en su TIF. Si el sensor no tiene una banda, ingrese 0: los índices que dependan de ella no se calcularán.")
+        ORDENES_SAT = {
+            "Script GEE de 10 bandas (B2,B3,B4,B5,B6,B7,B8,B8A,B11,B12)": [1, 2, 3, 4, 7, 9, 10],
+            "7 bandas en orden (azul, verde, rojo, red edge, NIR, SWIR 1, SWIR 2)": [1, 2, 3, 4, 5, 6, 7],
+        }
+        orden_sat = st.selectbox("Orden de bandas del TIF satélite:", list(ORDENES_SAT.keys()),
+                                 help="Cambiar la opción rellena los índices del satélite. Verifique la descripción de bandas del TIF (p. ej. en QGIS). Con el script GEE se usa B8 (10 m nativos) como NIR, B11 como SWIR 1 y B12 como SWIR 2.")
+        sd = ORDENES_SAT[orden_sat]
         c1, c2 = st.columns(2)
         with c1: 
             st.markdown("**Uas (dron)**")
@@ -1434,13 +1676,13 @@ with st.sidebar:
             bandas_config['uas'] = [u_b, u_g, u_r, u_re, u_n, u_swir1, u_swir2]
         with c2: 
             st.markdown("**Satélite**")
-            s_b = st.number_input("S-b", min_value=0, value=1, step=1)
-            s_g = st.number_input("S-g", min_value=0, value=2, step=1)
-            s_r = st.number_input("S-r", min_value=0, value=3, step=1)
-            s_re = st.number_input("S-re", min_value=0, value=4, step=1)
-            s_n = st.number_input("S-n", min_value=0, value=5, step=1)
-            s_swir1 = st.number_input("S-swir 1", min_value=0, value=6, step=1)
-            s_swir2 = st.number_input("S-swir 2", min_value=0, value=7, step=1)
+            s_b = st.number_input("S-b", min_value=0, value=sd[0], step=1, key=f"S-b_{orden_sat}")
+            s_g = st.number_input("S-g", min_value=0, value=sd[1], step=1, key=f"S-g_{orden_sat}")
+            s_r = st.number_input("S-r", min_value=0, value=sd[2], step=1, key=f"S-r_{orden_sat}")
+            s_re = st.number_input("S-re", min_value=0, value=sd[3], step=1, key=f"S-re_{orden_sat}")
+            s_n = st.number_input("S-n", min_value=0, value=sd[4], step=1, key=f"S-n_{orden_sat}")
+            s_swir1 = st.number_input("S-swir 1", min_value=0, value=sd[5], step=1, key=f"S-swir 1_{orden_sat}")
+            s_swir2 = st.number_input("S-swir 2", min_value=0, value=sd[6], step=1, key=f"S-swir 2_{orden_sat}")
             bandas_config['sat'] = [s_b, s_g, s_r, s_re, s_n, s_swir1, s_swir2]
     else:
         st.info("Para datos hiperespectrales puros, la plataforma leerá las bandas automáticamente. Si el TIF trae la longitud de onda en la descripción de cada banda (ej. 'B450'), se usará como eje X de las firmas; si no, se usará el número de banda. El visor espacial operará en modo exploración (banda a banda).")
@@ -1906,7 +2148,7 @@ if st.session_state.get("analisis_listo"):
             scene_color_map = glob_buf.get('scene_color_map', {})
 
             if tipo_datos_sesion == "Multiespectral (dron/satélite)":
-                gt1, gt2, gt3, gt4 = st.tabs(["Evolución UAS", "Evolución satélite", "Resumen de ajuste global (r²)", "Evolución fenológica (Índices)"])
+                gt1, gt2, gt3, gt4, gt5 = st.tabs(["Evolución UAS", "Evolución satélite", "Resumen de ajuste global (r²)", "Evolución fenológica (Índices)", "Guía de interpretación"])
                 with gt1:
                     cols = st.columns(3)
                     for i, c in enumerate(cobs):
@@ -2047,6 +2289,12 @@ if st.session_state.get("analisis_listo"):
                                     custom_download_button(buf_idx_temp, f"Evolucion_{idx_sel_glob}_{c}.png")
                     else:
                         st.warning("No se encontraron índices calculados para generar la evolución temporal. Asegúrese de haber configurado las bandas para extraer NDVI, NDWI, etc.")
+
+                with gt5:
+                    if all_c is not None and not all_c.empty:
+                        seccion_guia(all_c, df_firmas=all_f, sat_name=sat_name_sesion)
+                    else:
+                        st.info("La guía requiere escenas con dron y satélite.")
 
             else:
                  gt1 = st.tabs(["Evolución de firmas hiperespectrales"])[0]
