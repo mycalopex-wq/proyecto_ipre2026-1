@@ -382,11 +382,45 @@ def diagnosticar(df, df_firmas=None, sat_name=None):
 
 
 # ---------- Simulación de calibración (escena excluida) ----------
+
+SESGO_DESPRECIABLE = 0.02     # |sesgo medio| bajo este valor: no se calibra
+MEJORA_RMSE_MIN = 0.10        # mejora mínima de RMSE (10%) para recomendar calibrar
+
+
+def recomendar_calibracion(df):
+    """Por banda: ¿conviene calibrar? Usa el offset aprendido con las demás escenas, probado en cada escena excluida."""
+    loo = [simular_calibracion(df, "offset", e) for e in sorted(df["Escena"].unique())]
+    loo = [r for r in loo if not r.empty]
+    if not loo:
+        return pd.DataFrame()
+    g = pd.concat(loo).groupby(level=0)
+    out = pd.DataFrame({
+        "Sesgo medio": g["sesgo_antes"].mean(),
+        "Variación entre escenas": g["sesgo_antes"].std(),
+        "Offset a sumar al dron": g["offset"].mean(),
+        "RMSE antes": g["rmse_antes"].mean(),
+        "RMSE después": g["rmse_despues"].mean(),
+        "Escenas evaluadas": g.size()})
+    out["Mejora RMSE"] = 1 - out["RMSE después"] / out["RMSE antes"]
+
+    def veredicto(f):
+        if abs(f["Sesgo medio"]) < SESGO_DESPRECIABLE:
+            if f["Variación entre escenas"] >= SESGO_DESPRECIABLE:
+                return "No calibrar: el sesgo cambia entre escenas (un solo offset no sirve)"
+            return "No calibrar: sesgo despreciable"
+        if f["Mejora RMSE"] >= MEJORA_RMSE_MIN:
+            return "Calibrar: mejora el error en escenas excluidas"
+        return "No calibrar: la corrección no se transfiere entre escenas"
+
+    out["Recomendación"] = out.apply(veredicto, axis=1)
+    return out
+
+
 def simular_calibracion(df, metodo="offset", escena_fuera=None):
     """
     Calibra el dron hacia el satélite con las demás escenas y evalúa en la excluida.
     metodo: 'offset' (dron + sesgo medio por banda) o 'lineal' (a + b·dron por banda).
-    Devuelve tabla antes/después por banda en la escena excluida.
+    Devuelve, por banda, los parámetros de calibración y las métricas antes/después.
     """
     entrena, prueba = df[df["Escena"] != escena_fuera], df[df["Escena"] == escena_fuera]
     filas = []
@@ -396,23 +430,47 @@ def simular_calibracion(df, metodo="offset", escena_fuera=None):
             continue
         x, y = g["Uas"].values, g["Sat"].values
         if metodo == "offset":
-            xc = x + (t["Sat"] - t["Uas"]).mean()
+            off = (t["Sat"] - t["Uas"]).mean()
+            xc = x + off
+            params = dict(offset=off)
         else:
             b, a = np.polyfit(t["Uas"], t["Sat"], 1)
             xc = a + b * x
+            params = dict(intercepto=a, pendiente=b)
         antes, despues = guia_metricas(x, y), guia_metricas(xc, y)
-        filas.append(dict(Banda=banda,
+        filas.append(dict(Banda=banda, **params,
                           sesgo_antes=antes["sesgo"], sesgo_despues=despues["sesgo"],
                           rmse_antes=antes["rmse"], rmse_despues=despues["rmse"],
                           nse_antes=antes["nse"], nse_despues=despues["nse"]))
+    if not filas:
+        return pd.DataFrame()
     return pd.DataFrame(filas).set_index("Banda")
 
 
+def precalcular_calibracion(df, df_firmas=None, sat_name=None):
+    """Calcula una sola vez todo lo que muestra la guía: notas, recomendación y la
+    simulación de cada escena con cada método. Así, al cambiar de escena o de método
+    en la interfaz solo se lee un resultado ya guardado."""
+    escenas = sorted(df["Escena"].unique())
+    sims = {}
+    if len(escenas) >= 2:
+        for e in escenas:
+            for m in ("offset", "lineal"):
+                sims[(m, e)] = simular_calibracion(df, m, e)
+    return {
+        "notas": diagnosticar(df, df_firmas, sat_name),
+        "rec": recomendar_calibracion(df) if len(escenas) >= 2 else pd.DataFrame(),
+        "sims": sims,
+    }
+
+
 # ---------- Interfaz Streamlit ----------
-def seccion_guia(df, df_firmas=None, sat_name=None):
+def seccion_guia(df, df_firmas=None, sat_name=None, cache=None):
+    if cache is None:  # respaldo: si no viene precalculado, se calcula aquí
+        cache = precalcular_calibracion(df, df_firmas, sat_name)
     st.subheader("Interpretación de resultados")
     st.caption("Observaciones generadas por reglas fijas a partir de las métricas calculadas.")
-    notas = diagnosticar(df, df_firmas, sat_name)
+    notas = cache["notas"]
     tabla = pd.DataFrame(notas).rename(columns={
         "prioridad": "Prioridad", "titulo": "Observación", "dato": "Dato",
         "lectura": "Lectura", "accion": "Acción sugerida"})
@@ -422,17 +480,50 @@ def seccion_guia(df, df_firmas=None, sat_name=None):
         st.info("La simulación de calibración requiere al menos dos escenas: se calibra con las demás y se evalúa en la excluida.")
         return
 
+
+
+    st.subheader("¿Qué bandas requieren calibración?")
+    st.caption("Se calibra cada banda con las demás escenas y se prueba en cada escena excluida. "
+               f"Se recomienda calibrar solo si |sesgo medio| ≥ {SESGO_DESPRECIABLE} y el RMSE mejora al menos {MEJORA_RMSE_MIN:.0%}.")
+    rec = cache["rec"]
+    if rec.empty:
+        st.info("No hay suficientes datos (mínimo 10 puntos por banda en las otras escenas).")
+    else:
+        a_calibrar = [b for b, r in rec["Recomendación"].items() if r.startswith("Calibrar")]
+        if a_calibrar:
+            st.warning("Bandas a calibrar: " + ", ".join(a_calibrar))
+        else:
+            st.success("Ninguna banda requiere calibración: el dron coincide con el satélite dentro de lo esperado.")
+        st.dataframe(rec.style.format({
+            "Sesgo medio": "{:+.3f}", "Variación entre escenas": "{:.3f}", "Offset a sumar al dron": "{:+.3f}",
+            "RMSE antes": "{:.3f}", "RMSE después": "{:.3f}", "Mejora RMSE": "{:.0%}"}),
+            use_container_width=True)
+
+
     st.subheader("Simulación de calibración")
     st.caption("Calibración con las demás escenas y evaluación en la escena seleccionada.")
     c1, c2 = st.columns(2)
     escena = c1.selectbox("Escena evaluada", sorted(df["Escena"].unique()))
     metodo = c2.radio("Método", ["offset", "lineal"], horizontal=True)
-    res = simular_calibracion(df, metodo, escena)
-    res.columns = ["Sesgo antes", "Sesgo después", "RMSE antes", "RMSE después",
-                   "NSE antes", "NSE después"]
+    res = cache["sims"][(metodo, escena)]
+    if res.empty:
+        st.info("No hay suficientes datos (mínimo 10 puntos por banda en las otras escenas).")
+        return
+    res = res.rename(columns={
+        "offset": "Offset a sumar al dron", "intercepto": "Intercepto (a)", "pendiente": "Pendiente (b)",
+        "sesgo_antes": "Sesgo antes", "sesgo_despues": "Sesgo después",
+        "rmse_antes": "RMSE antes", "rmse_despues": "RMSE después",
+        "nse_antes": "NSE antes", "nse_despues": "NSE después"})
     st.dataframe(res.style.format("{:.3f}"), use_container_width=True)
+    if metodo == "offset":
+        st.caption(f"Offset medio entre bandas: {res['Offset a sumar al dron'].mean():+.3f} "
+                   "(en reflectancia 0–1; multiplicado por la escala del satélite da el valor en cuentas digitales).")
+    else:
+        st.caption("Calibración lineal: Sat ≈ a + b · Dron, ajustada por banda con las demás escenas.")
     st.caption("Si el sesgo se origina en el offset del satélite, corresponde corregir ese "
                "parámetro; la calibración del dron solo compensa el error.")
+
+
 
 
 @st.cache_data
@@ -1422,6 +1513,10 @@ def construir_zip(data_escenas, tipo_datos, sat_name, bandas_config, params, col
     z = zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED)
     contenido = []
     def add(ruta, datos):
+        if ruta in contenido:  # dos nombres distintos pueden quedar iguales tras _nombre_seguro
+            raiz, ext = os.path.splitext(ruta); n = 2
+            while f"{raiz}_{n}{ext}" in contenido: n += 1
+            ruta = f"{raiz}_{n}{ext}"
         z.writestr(ruta, datos); contenido.append(ruta)
     def add_csv(ruta, df):
         if df is not None and len(df) > 0: add(ruta, df.to_csv(index=False).encode('utf-8-sig'))
@@ -1512,44 +1607,107 @@ def construir_zip(data_escenas, tipo_datos, sat_name, bandas_config, params, col
                     if not sub.empty:
                         add(f"global/graficos/Evolucion_{_nombre_seguro(ind)}_{_nombre_seguro(c)}.png", export_formal_temporal_index(sub, ind, c, sat_name))
 
-    # Archivo explicativo
+    # Archivo explicativo (solo describe lo que realmente quedó dentro del ZIP)
     ahora = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    readme = f"""RESULTADOS - Plataforma de Validación Espectral y Multitemporal
-Generado: {ahora}
+    def hay(prefijo, sub=None, sufijo=None):
+        for r in contenido:
+            if not r.startswith(prefijo): continue
+            if sub is not None and f"/{sub}/" not in r: continue
+            if sufijo is not None and not r.endswith(sufijo): continue
+            return True
+        return False
 
-PARÁMETROS DE LA CORRIDA
-Modalidad: {tipo_datos}
-Satélite: {sat_name}
-Escala / offset satélite: {params['sat_scale']} / {params['sat_offset']}
-Escala / offset dron: {params['uas_scale']} / {params['uas_offset']}
-Reflectancia = (valor del pixel + offset) / escala
-Bandas dron (nº desde 1; 0 = no existe) [azul, verde, rojo, red edge, nir, swir1, swir2]: {bandas_config.get('uas')}
-Bandas satélite: {bandas_config.get('sat')}
-Capa vectorial: {params.get('capa') or '(única)'}
-Escenas: {', '.join(names)}
+    L = []
+    L += ["RESULTADOS - Plataforma de Validación Espectral y Multitemporal",
+          f"Generado: {ahora}", "",
+          "PARÁMETROS DE LA CORRIDA",
+          f"Modalidad: {tipo_datos}",
+          f"Satélite: {sat_name}"]
+    if params.get('sat_preset'): L.append(f"Preset radiométrico del satélite: {params['sat_preset']}")
+    L.append(f"Escala / offset satélite: {params['sat_scale']} / {params['sat_offset']}")
+    if multi: L.append(f"Escala / offset dron: {params['uas_scale']} / {params['uas_offset']}")
+    L.append("Reflectancia = (valor del pixel + offset) / escala")
+    if multi:
+        L.append(f"Bandas dron (nº desde 1; 0 = no existe) [azul, verde, rojo, red edge, nir, swir1, swir2]: {bandas_config.get('uas')}")
+        L.append(f"Bandas satélite [azul, verde, rojo, red edge, nir, swir1, swir2]: {bandas_config.get('sat')}")
+    else:
+        L.append("Bandas: lectura automática desde el TIF hiperespectral (eje X = longitud de onda si la descripción de la banda la trae, si no el nº de banda).")
+    if params.get('has_vector'):
+        L.append(f"Capa vectorial: {params.get('capa') or '(única)'}")
+        L.append(f"Columna de cobertura: {params.get('col_clase') or '(no indicada)'}")
+    else:
+        L.append("Archivo vectorial: no cargado (modo visor, sin extracción de datos).")
+    L.append(f"Escenas ({len(names)}): {', '.join(names)}")
+    if multi:
+        L.append("Mapas de banda individual: " + ("incluidos (hasta 12 bandas por sensor)" if incluir_bandas else "no incluidos (opción desmarcada al preparar el ZIP)"))
+    L.append("")
 
-ESTRUCTURA
-escenas/<escena>/mapas/                  Mapas (RGB, falso color, índices, banda individual)
-escenas/<escena>/firmas/                 Firmas espectrales (generales y por cobertura)
-escenas/<escena>/indices/                Distribución y dispersión dron vs satélite por índice
-escenas/<escena>/ajuste_radiometrico/    Regresiones y R²
-escenas/<escena>/datos/                  Tablas CSV (firmas, correlaciones, índices, métricas, superficies)
-global/graficos/                         Evolución entre escenas, R² global, regresiones consolidadas
-global/datos/                            Tablas CSV consolidadas y métricas por escena
+    if params.get('has_vector'):
+        L += ["MUESTREO Y PROCESAMIENTO",
+              "Sistema de coordenadas: proyectado en metros, definido por el primer archivo de la escena 1; los demás rasters y el vector se reproyectaron a ese sistema.",
+              "Área común: cada escena se recortó a la zona donde se superponen los datos de los sensores y el vector.",
+              "Muestreo: hasta 100 puntos aleatorios por cobertura, ponderados por área, con semilla fija (42), como máximo un punto por píxel del satélite. Una cobertura angosta puede tener menos de 100 puntos.",
+              "Se descartan los píxeles sin dato (incluido el valor de relleno -9999 de GEE)."]
+        if multi: L.append("Remuestreo: el dron se promedia sobre la grilla exacta del satélite para compararlos; también se conserva su resolución nativa.")
+        L.append("")
 
-MÉTRICAS DE AJUSTE (Satélite vs Dron)
-n: puntos válidos en ambos sensores.
-Pendiente, Intercepto, R²: de la regresión Sat = a + b · Dron.
-Sesgo (Sat - Uas): promedio de (Sat - Dron). MAE: error absoluto medio. RMSE: raíz del error cuadrático medio.
-Sesgo, MAE y RMSE se calculan contra la línea 1:1 (unidades de reflectancia o del índice).
-PBIAS (%): 100·Σ(Sat - Dron)/ΣSat; positivo = el dron subestima. NRMSE (%): RMSE / rango del satélite.
-NSE (Nash-Sutcliffe) y KGE (Kling-Gupta 2009): satélite como referencia; 1 = concordancia perfecta.
-IC95%: intervalos de confianza (t de Student) de la pendiente, el intercepto y el sesgo.
-El R² global y por cobertura agrupa todas las bandas y suele quedar elevado; para evaluar al dron, priorice las métricas por banda.
+    estructura = [
+        ("escenas/", "mapas", "escenas/<escena>/mapas/", "Mapas (RGB, falso color, índices" + (", banda individual" if incluir_bandas and multi else "") + ")"),
+        ("escenas/", "firmas", "escenas/<escena>/firmas/", "Firmas espectrales (generales" + (" y por cobertura" if hay("escenas/", "por_cobertura") else "") + ")"),
+        ("escenas/", "indices", "escenas/<escena>/indices/", "Distribución y dispersión dron vs satélite por índice"),
+        ("escenas/", "ajuste_radiometrico", "escenas/<escena>/ajuste_radiometrico/", "Regresiones (global, por cobertura y por banda) y R²"),
+        ("escenas/", "datos", "escenas/<escena>/datos/", "Tablas CSV de la escena"),
+        ("global/graficos/", None, "global/graficos/", "Evolución entre escenas, R² global, regresiones consolidadas"),
+        ("global/datos/", None, "global/datos/", "Tablas CSV consolidadas y métricas por escena"),
+    ]
+    filas = [(ruta, desc) for pref, sub, ruta, desc in estructura if hay(pref, sub)]
+    if filas:
+        L.append("ESTRUCTURA")
+        ancho = max(len(r) for r, _ in filas) + 2
+        L += [f"{r.ljust(ancho)}{d_}" for r, d_ in filas]
+        L.append("")
 
-Archivos incluidos: {len(contenido)}
-"""
-    add("README.txt", readme.encode('utf-8'))
+    csv_desc = [
+        ("firmas.csv", "Reflectancia media por cobertura, banda y sensor."),
+        ("correlacion_bandas.csv", "Puntos muestreados (dron y satélite) por cobertura y banda: base de las regresiones."),
+        ("indices.csv", "Valores de los índices (NDVI, NDWI, MNDWI, NDMI, SAVI) por punto y sensor."),
+        ("correlacion_indices.csv", "Pares dron-satélite de cada índice: base de las regresiones de índices."),
+        ("metricas_global.csv", "Métricas de ajuste con todos los puntos de la escena."),
+        ("metricas_por_cobertura.csv", "Métricas de ajuste por cobertura."),
+        ("metricas_por_banda.csv", "Métricas de ajuste por banda."),
+        ("metricas_cobertura_banda.csv", "Métricas de ajuste por cobertura × banda."),
+        ("metricas_indices.csv", "Métricas de ajuste por índice y cobertura."),
+        ("superficie_por_cobertura.csv", "Superficie de cada cobertura dentro del área común (m² y ha)."),
+        ("firmas_globales.csv", "Firmas de todas las escenas en una sola tabla."),
+        ("correlaciones_globales.csv", "Puntos dron-satélite de todas las escenas."),
+        ("indices_globales.csv", "Índices de todas las escenas."),
+        ("metricas_por_escena.csv", "Métricas de ajuste por escena."),
+        ("metricas_escena_cobertura.csv", "Métricas de ajuste por escena × cobertura."),
+        ("metricas_escena_banda.csv", "Métricas de ajuste por escena × banda."),
+    ]
+    presentes = [(n_, d_) for n_, d_ in csv_desc if hay("", None, "/" + n_)]
+    if presentes:
+        L.append("TABLAS CSV (UTF-8 con BOM, separador coma, decimal punto; se abren directo en Excel)")
+        ancho = max(len(n_) for n_, _ in presentes) + 2
+        L += [f"{n_.ljust(ancho)}{d_}" for n_, d_ in presentes]
+        L.append("")
+
+    if hay("", None, "/metricas_global.csv") or hay("global/datos/", None, "metricas_por_escena.csv"):
+        L += ["MÉTRICAS DE AJUSTE (Satélite vs Dron)",
+              "n: puntos válidos en ambos sensores.",
+              "Pendiente, Intercepto, R²: de la regresión Sat = a + b · Dron.",
+              "Sesgo (Sat - Dron): promedio de (Sat - Dron). MAE: error absoluto medio. RMSE: raíz del error cuadrático medio.",
+              "Sesgo, MAE y RMSE se calculan contra la línea 1:1 (unidades de reflectancia o del índice).",
+              "PBIAS (%): 100·Σ(Sat - Dron)/ΣSat; positivo = el dron subestima. NRMSE (%): RMSE / rango del satélite.",
+              "NSE (Nash-Sutcliffe) y KGE (Kling-Gupta 2009): satélite como referencia; 1 = concordancia perfecta.",
+              "IC95%: intervalos de confianza (t de Student) de la pendiente, el intercepto y el sesgo.",
+              "Los puntos se sortean dentro de los polígonos y pueden tener autocorrelación espacial: los intervalos son optimistas.",
+              "El R² global y por cobertura agrupa todas las bandas y suele quedar elevado; para evaluar al dron, priorice las métricas por banda.",
+              ""]
+
+    L.append(f"Archivos incluidos: {len(contenido) + 1} (contando este README)")
+    readme = "\n".join(L) + "\n"
+    add("README.txt", readme.encode('utf-8-sig'))
     z.close()
     return buf.getvalue(), len(contenido)
 
@@ -1704,11 +1862,11 @@ with st.sidebar:
                         st.session_state.data_escenas = {}
                         st.session_state.bandas_config = bandas_config
                         # Limpiar resultados de corridas anteriores y congelar los parámetros de esta corrida
-                        for k_old in ['df_global_all_f', 'df_global_all_c', 'df_global_all_i', 'global_buffers',
+                        for k_old in ['df_global_all_f', 'df_global_all_c', 'df_global_all_i', 'global_buffers', 'calib_cache',
                                       'scene_color_map', 'color_map', 'zip_bytes', 'zip_n', 'zip_nombre']:
                             st.session_state.pop(k_old, None)
                         st.session_state.params_run = {
-                            'sat_scale': sat_scale, 'sat_offset': sat_offset, 'uas_scale': uas_scale, 'uas_offset': uas_offset,
+                            'sat_scale': sat_scale, 'sat_offset': sat_offset, 'uas_scale': uas_scale, 'uas_offset': uas_offset, 'sat_preset': sat_preset,
                             'col_clase': st.session_state.get('col_clase'), 'capa': st.session_state.get('capa_vector'), 'has_vector': bool(st.session_state.get('has_vector'))}
                         
                         tipo_simplificado = "Multiespectral (dron/satélite)" if tipo_datos == "1. Multiespectral (dron/satélite)" else "Hiperespectral"
@@ -2139,6 +2297,8 @@ if st.session_state.get("analisis_listo"):
                     st.session_state['df_global_all_c'] = all_c
                     st.session_state['df_global_all_i'] = all_i
                     st.session_state['global_buffers'] = pre_generar_graficos_globales(all_f, all_c, sat_name_sesion, tipo_datos_sesion, st.session_state.color_map)
+                    if all_c is not None and not all_c.empty and tipo_datos_sesion == "Multiespectral (dron/satélite)":
+                        st.session_state['calib_cache'] = precalcular_calibracion(all_c, all_f, sat_name_sesion)
             
             all_f = st.session_state['df_global_all_f']
             all_c = st.session_state['df_global_all_c']
@@ -2292,7 +2452,10 @@ if st.session_state.get("analisis_listo"):
 
                 with gt5:
                     if all_c is not None and not all_c.empty:
-                        seccion_guia(all_c, df_firmas=all_f, sat_name=sat_name_sesion)
+                        if 'calib_cache' not in st.session_state:
+                            with st.spinner("Precalculando simulaciones de calibración..."):
+                                st.session_state['calib_cache'] = precalcular_calibracion(all_c, all_f, sat_name_sesion)
+                        seccion_guia(all_c, df_firmas=all_f, sat_name=sat_name_sesion, cache=st.session_state['calib_cache'])
                     else:
                         st.info("La guía requiere escenas con dron y satélite.")
 
@@ -2343,8 +2506,8 @@ else:
     1. **Modalidad de análisis:** elija *Multiespectral (dron/satélite)* o *Hiperespectral*.
     2. **Archivo vectorial (opcional):** cargue un `.zip` con el shapefile completo (`.shp`, `.shx`, `.dbf`, `.prj`) o un `.gpkg`, y seleccione la columna que identifica la cobertura de cada polígono. **Con vector** se activa el modo completo (firmas, índices, regresiones y comparación global). **Sin vector** la plataforma opera solo como visor espacial.
     3. **Escenas:** indique cuántas escenas (fechas o campañas) analizará, hasta 10, y cargue en cada una el GeoTIFF del dron y/o del satélite (en hiperespectral, solo la imagen hiperespectral). Se recomienda nombrar los archivos `AAAA-MM-DD_Lugar_...tif`: de ahí se obtiene el título de cada escena, por ejemplo *Laguna Verde (2025-07-15)*.
-    4. **Ajustes radiométricos:** seleccione el preset del satélite o use *Personalizado*, e ingrese la escala y el offset del dron. La reflectancia se calcula como `(valor + offset) / escala` y ambos sensores deben quedar entre 0 y 1.
-    5. **Configuración de bandas** (solo multiespectral): indique el número de banda (desde 1) de cada color en el dron y en el satélite. Si el sensor no posee una banda (ej. SWIR), ingrese **0**.
+    4. **Ajustes radiométricos:** seleccione el preset del satélite o use *Personalizado*, e ingrese la escala y el offset del dron. La reflectancia se calcula como `(valor + offset) / escala` y ambos sensores deben quedar entre 0 y 1. Por defecto se usa el preset de Google Earth Engine (offset 0): si exportó Sentinel-2 desde `S2_SR_HARMONIZED`, el offset de 1000 ya viene restado y usar -1000 lo restaría dos veces. El preset *Copernicus directo, post-2022* es solo para productos sin armonizar.
+    5. **Configuración de bandas** (solo multiespectral): indique el número de banda (desde 1) de cada color en el dron y en el satélite. Si el sensor no posee una banda (ej. SWIR), ingrese **0**. Para el satélite, el selector *Orden de bandas del TIF satélite* rellena los números según el archivo (por defecto, el script GEE de 10 bandas: `[1, 2, 3, 4, 7, 9, 10]`); verifique siempre el orden en la descripción de bandas del TIF, por ejemplo en QGIS.
     6. **Ejecutar plataforma:** la plataforma valida los archivos y prepara las escenas. Los resultados se procesan al abrir cada pestaña. Use **Reiniciar entorno** para empezar de nuevo.
     """)
 
@@ -2353,7 +2516,7 @@ else:
     * **Sistema de coordenadas:** el primer archivo de la escena 1 define el sistema del proyecto y debe ser **proyectado en metros** (ej. UTM). Si está en grados geográficos, la plataforma se detiene. Los demás rasters y el vector se reproyectan automáticamente a ese sistema.
     * **Área común:** cada escena se recorta a la zona donde se superponen la huella real de datos del dron (no su rectángulo envolvente), el satélite y el vector. Si no hay superposición, se informa un error.
     * **Remuestreo:** se detecta la resolución nativa del dron. Para compararlo con el satélite se promedia (no se interpola) sobre la grilla exacta del satélite; si el dron ya está a esa resolución y alineado, se usa sin suavizar, y si es más grueso se avisa. Para el visor espacial se reduce a 2 m solo si el dron es más fino. También se conserva su resolución nativa.
-    * **Muestreo:** en cada cobertura se sortean hasta 100 puntos aleatorios dentro de sus polígonos, ponderados por área. El sorteo usa una semilla fija, por lo que los resultados son reproducibles. Los píxeles sin dato se descartan.
+    * **Muestreo:** en cada cobertura se sortean hasta 100 puntos aleatorios dentro de sus polígonos, ponderados por área. Se toma como máximo un punto por píxel del satélite, por lo que no hay muestras repetidas y una cobertura angosta (ej. un cauce) puede quedar con menos de 100 puntos. El sorteo usa una semilla fija, por lo que los resultados son reproducibles. Los píxeles sin dato se descartan, incluido el valor de relleno -9999 de GEE.
     * **Firmas e índices:** se promedia la reflectancia de los puntos por banda y cobertura, y se calculan NDVI, NDWI, MNDWI, NDMI y SAVI (cada índice se calcula solo si el sensor tiene las bandas necesarias).
     * **Ajuste radiométrico:** se ajusta una regresión lineal Satélite = a + b · Dron sobre los puntos válidos en ambos sensores, por cobertura, por banda y global, y se reporta el $R^2$ junto con la pendiente, el intercepto, el sesgo, el PBIAS, el MAE, el RMSE, el NRMSE, el NSE y el KGE (error directo entre sensores, con el satélite como referencia), además de intervalos de confianza al 95% para la pendiente, el intercepto y el sesgo. Se muestra también la línea 1:1.
     """)
@@ -2366,7 +2529,7 @@ else:
     * **Firmas espectrales:** curvas de reflectancia del dron y del satélite, generales y por cobertura.
     * **Estadística de índices** (multiespectral): distribución de cada índice por cobertura y sensor, y su dispersión dron vs satélite.
     * **Ajuste radiométrico** (multiespectral): $R^2$ por cobertura, regresión global, regresiones por cobertura y por banda, y una tabla de métricas de error (pendiente, intercepto, sesgo, PBIAS, MAE, RMSE, NRMSE, NSE, KGE e intervalos de confianza al 95%). Puede filtrar las bandas que entran al cálculo.
-    * **Comparación global:** con vector cargado, aparece una pestaña final que compara todas las escenas: evolución de las firmas, resumen de $R^2$ y evolución temporal de los índices.
+    * **Comparación global:** con vector cargado, aparece una pestaña final que compara todas las escenas: evolución de las firmas, resumen de $R^2$, evolución temporal de los índices y una **Guía de interpretación**, que avisa de un offset mal aplicado, bandas mal asignadas, valores de relleno o píxeles mixtos, indica qué bandas conviene calibrar (y cuáles no) y simula la calibración en una escena excluida.
 
     Todos los gráficos se pueden descargar en PNG de alta resolución, y las tablas numéricas en CSV desde los *Centros de descargas*. Además, el botón **Descargar todos los resultados (ZIP)**, en la parte superior de los resultados, reúne todo en un solo archivo ordenado por carpetas.
     """)
@@ -2376,6 +2539,9 @@ else:
         * Un $R^2$ cercano a 1.0 indica que el dron y el satélite varían de forma muy parecida. Revise también la **línea 1:1**, la **pendiente**, el **sesgo** y el **RMSE**: un $R^2$ alto no detecta por sí solo un desfase o una diferencia de escala sistemática entre sensores.
         * El $R^2$ global y por cobertura agrupa todas las bandas, y las diferencias naturales entre bandas (ej. NIR vs azul) lo elevan. Para evaluar al dron, priorice las métricas **por banda**.
         * El píxel satelital (ej. 10 m) mezcla varias superficies, mientras que el dron las distingue. En coberturas heterogéneas es normal un $R^2$ menor y curvas satelitales más aplanadas (efecto de escala o píxel mixto).
+        * Si todas las bandas muestran el mismo sesgo (cercano a ±0,1 en Sentinel-2), sospeche primero del offset del satélite y no del dron. Si el NIR, el SWIR 1 y el SWIR 2 salen casi iguales, o el SWIR es mayor que el NIR en agua, sospeche del orden de bandas. La **Guía de interpretación** de la comparación global revisa estos casos.
+        * Calibre el dron solo en las bandas donde el sesgo sea relevante y consistente entre escenas; con sesgos de unas milésimas, el dron no necesita calibración.
+        * En elementos más angostos que el píxel (un cauce, una orilla) la pendiente baja y el NIR suele ser la banda más afectada.
         * Las regresiones requieren más de 2 puntos válidos por grupo. Si una cobertura es muy pequeña o queda fuera de la imagen, puede no aparecer.
         """)
 
